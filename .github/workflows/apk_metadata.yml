@@ -1,0 +1,37 @@
+name: APK Metadata
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 20 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  apk-metadata:
+    name: Resolve TapTap APK
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve latest TapTap APK
+        run: python tools/phigros_updater.py resolve-apk > taptap-apk.json
+
+      - name: Publish APK metadata
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-latest
+          name: Latest TapTap APK Metadata
+          body: |
+            Latest TapTap APK metadata for the Android app.
+            This workflow only resolves the official TapTap download address.
+          files: taptap-apk.json
+          make_latest: false
+          overwrite_files: true

@@ -258,7 +258,7 @@ class _LibraryHomeState extends State<LibraryHome> {
     setState(() => _updating = true);
     ApkRelease? release;
     Object? error;
-    if (!updater.usesResourceBundle) {
+    if (!updater.usesRemoteApkMetadata) {
       try {
         release = await updater.resolveLatest();
       } on Object catch (caught) {
@@ -283,7 +283,7 @@ class _LibraryHomeState extends State<LibraryHome> {
             error: error,
             canUpdate: updater.canUpdate,
             updating: _updating,
-            usesResourceBundle: updater.usesResourceBundle,
+            usesRemoteApkMetadata: updater.usesRemoteApkMetadata,
             onCatalogOnlyUpdate: () => _runUpdate(catalogOnly: true),
             onFullUpdate: () => _runUpdate(catalogOnly: false),
           );
@@ -319,7 +319,7 @@ class _LibraryHomeState extends State<LibraryHome> {
         if (mounted) {
           setState(() => _updateEvent = event);
         }
-        output = event.output;
+        output = event.output.isEmpty ? event.message : event.output;
         success = event.stage == ResourceUpdateStage.complete;
         if (event.stage == ResourceUpdateStage.failed) {
           break;
@@ -564,7 +564,7 @@ class _UpdateSheet extends StatelessWidget {
     required this.error,
     required this.canUpdate,
     required this.updating,
-    required this.usesResourceBundle,
+    required this.usesRemoteApkMetadata,
     required this.onCatalogOnlyUpdate,
     required this.onFullUpdate,
   });
@@ -574,7 +574,7 @@ class _UpdateSheet extends StatelessWidget {
   final Object? error;
   final bool canUpdate;
   final bool updating;
-  final bool usesResourceBundle;
+  final bool usesRemoteApkMetadata;
   final VoidCallback onCatalogOnlyUpdate;
   final VoidCallback onFullUpdate;
 
@@ -604,10 +604,11 @@ class _UpdateSheet extends StatelessWidget {
                   : '${catalog?.songs.length ?? 0} 首，$localVersion，${generatedAt.toLocal()}',
             ),
             const SizedBox(height: 12),
-            if (usesResourceBundle)
+            if (usesRemoteApkMetadata)
               const _InfoChip(
-                label: '在线资源包',
-                value: '由 GitHub Actions 通过 TapTap 下载 APK 后解包生成，下载后会保存到应用本地目录。',
+                label: 'APK 下载地址',
+                value:
+                    '由 GitHub Actions 只解析最新 APK 地址；应用运行时下载 APK，TapTap 和资源不会打包进应用。',
               )
             else if (release != null)
               _InfoChip(
@@ -625,7 +626,7 @@ class _UpdateSheet extends StatelessWidget {
               spacing: 10,
               runSpacing: 10,
               children: [
-                if (!usesResourceBundle)
+                if (!usesRemoteApkMetadata)
                   FilledButton.icon(
                     onPressed:
                         canUpdate && !updating ? onCatalogOnlyUpdate : null,
@@ -635,7 +636,7 @@ class _UpdateSheet extends StatelessWidget {
                 FilledButton.icon(
                   onPressed: canUpdate && !updating ? onFullUpdate : null,
                   icon: const Icon(Icons.download),
-                  label: Text(usesResourceBundle ? '下载资源' : '下载并解包'),
+                  label: Text(usesRemoteApkMetadata ? '下载 APK' : '下载并解包'),
                 ),
               ],
             ),
@@ -699,7 +700,7 @@ class _UpdateStatusBanner extends StatelessWidget {
   static String _stageLabel(ResourceUpdateStage stage) {
     return switch (stage) {
       ResourceUpdateStage.resolving => '检查资源来源',
-      ResourceUpdateStage.downloading => '下载资源',
+      ResourceUpdateStage.downloading => '下载 APK',
       ResourceUpdateStage.extractingMetadata => '读取曲目信息',
       ResourceUpdateStage.extractingAssets => '解压资源',
       ResourceUpdateStage.writingCatalog => '写入目录',
@@ -747,7 +748,7 @@ class _EmptyState extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              '点击下载资源后，应用会获取由 TapTap APK 解包生成的资源包，并显示曲目、曲绘、音乐和谱面信息。',
+              '点击下载 APK 后，应用会从轻量下载地址 JSON 获取官方 APK 地址；TapTap、APK 和资源都不会预打包进应用。',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyMedium,
             ),
@@ -755,7 +756,7 @@ class _EmptyState extends StatelessWidget {
             FilledButton.icon(
               onPressed: onUpdate,
               icon: const Icon(Icons.download),
-              label: const Text('下载资源'),
+              label: const Text('下载 APK'),
             ),
           ],
         ),

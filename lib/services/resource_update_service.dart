@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:archive/archive_io.dart';
 import 'package:path/path.dart' as p;
 
 enum ResourceUpdateStage {
@@ -87,22 +86,26 @@ class ResourceUpdateService {
       'PYTHON',
       defaultValue: 'python',
     ),
-    this.resourceBundleUrl = const String.fromEnvironment(
-      'PHIGROS_RESOURCE_BUNDLE',
+    this.apkMetadataUrl = const String.fromEnvironment(
+      'PHIGROS_APK_METADATA',
       defaultValue:
-          'https://github.com/Edward334/Phi_Res_Extract/releases/download/resources-latest/phigros-library.zip',
+          'https://github.com/Edward334/Phi_Res_Extract/releases/download/apk-latest/taptap-apk.json',
     ),
   });
 
   final String libraryRoot;
   final String scriptPath;
   final String pythonExecutable;
-  final String resourceBundleUrl;
+  final String apkMetadataUrl;
 
   bool get canUpdate => libraryRoot.trim().isNotEmpty;
-  bool get usesResourceBundle => Platform.isAndroid;
+  bool get usesRemoteApkMetadata => Platform.isAndroid;
 
   Future<ApkRelease> resolveLatest() async {
+    if (usesRemoteApkMetadata) {
+      return _resolveLatestFromMetadata();
+    }
+
     final result = await Process.run(
         pythonExecutable,
         [
@@ -143,8 +146,8 @@ class ResourceUpdateService {
       throw StateError('PHIGROS_LIBRARY is required before updating.');
     }
 
-    if (usesResourceBundle) {
-      yield* _downloadResourceBundleStream();
+    if (usesRemoteApkMetadata) {
+      yield* _downloadApkStream();
       return;
     }
 
@@ -198,33 +201,70 @@ class ResourceUpdateService {
     }
   }
 
-  Stream<ResourceUpdateEvent> _downloadResourceBundleStream() async* {
-    final root = Directory(libraryRoot);
-    final parent = root.parent;
-    await parent.create(recursive: true);
-
-    final zip = File(p.join(parent.path, 'phigros-library.zip'));
-    final part = File('${zip.path}.part');
-    final staging = Directory('${root.path}.staging');
-
-    yield const ResourceUpdateEvent(
-      stage: ResourceUpdateStage.resolving,
-      message: '正在连接在线资源包',
-    );
-
-    final uri = Uri.parse(resourceBundleUrl);
+  Future<ApkRelease> _resolveLatestFromMetadata() async {
+    final uri = Uri.parse(apkMetadataUrl);
     final client = HttpClient();
     try {
       final request = await client.getUrl(uri);
       final response = await request.close();
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw HttpException(
-          '资源包下载失败：HTTP ${response.statusCode}',
+          'APK 下载信息获取失败：HTTP ${response.statusCode}',
+          uri: uri,
+        );
+      }
+      final source = await response.transform(utf8.decoder).join();
+      return ApkRelease.fromUpdaterJson(
+        jsonDecode(source) as Map<String, dynamic>,
+      );
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Stream<ResourceUpdateEvent> _downloadApkStream() async* {
+    final root = Directory(libraryRoot);
+    final apkDir = Directory(p.join(root.path, 'apk'));
+    await apkDir.create(recursive: true);
+
+    final apk = File(p.join(apkDir.path, 'phigros_latest.apk'));
+    final part = File('${apk.path}.part');
+    final metadataFile = File(p.join(apkDir.path, 'taptap-apk.json'));
+
+    yield const ResourceUpdateEvent(
+      stage: ResourceUpdateStage.resolving,
+      message: '正在获取 APK 下载地址',
+    );
+
+    final client = HttpClient();
+    try {
+      final release = await _resolveLatestFromMetadata();
+      await metadataFile.writeAsString(
+        jsonEncode({
+          'url': release.url,
+          'versionName': release.versionName,
+          'versionCode': release.versionCode,
+          'updateDate': release.updateDate,
+          'size': release.size,
+        }),
+        encoding: utf8,
+      );
+
+      if (release.url.isEmpty) {
+        throw const FormatException('APK 下载地址为空');
+      }
+
+      final uri = Uri.parse(release.url);
+      final request = await client.getUrl(uri);
+      final response = await request.close();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw HttpException(
+          'APK 下载失败：HTTP ${response.statusCode}',
           uri: uri,
         );
       }
 
-      final total = response.contentLength;
+      final total = release.size > 0 ? release.size : response.contentLength;
       var downloaded = 0;
       final sink = part.openWrite();
       await for (final chunk in response) {
@@ -233,83 +273,28 @@ class ResourceUpdateService {
         yield ResourceUpdateEvent(
           stage: ResourceUpdateStage.downloading,
           message: total > 0
-              ? '正在下载资源包 ${_formatBytes(downloaded)} / ${_formatBytes(total)}'
-              : '正在下载资源包 ${_formatBytes(downloaded)}',
+              ? '正在下载 APK ${_formatBytes(downloaded)} / ${_formatBytes(total)}'
+              : '正在下载 APK ${_formatBytes(downloaded)}',
           progress: total > 0 ? downloaded / total : null,
         );
       }
       await sink.close();
-      if (await zip.exists()) {
-        await zip.delete();
+      if (await apk.exists()) {
+        await apk.delete();
       }
-      await part.rename(zip.path);
-
-      if (await staging.exists()) {
-        await staging.delete(recursive: true);
-      }
-      await staging.create(recursive: true);
+      await part.rename(apk.path);
 
       yield const ResourceUpdateEvent(
-        stage: ResourceUpdateStage.extractingAssets,
-        message: '正在解压资源包',
-      );
-
-      final input = InputFileStream(zip.path);
-      final archive = ZipDecoder().decodeBuffer(input);
-      final files = archive.files.where((file) => file.isFile).toList();
-      var extracted = 0;
-      for (final file in archive.files) {
-        final name = _normalizedArchivePath(file.name);
-        if (name == null) {
-          continue;
-        }
-        final target = p.join(staging.path, name);
-
-        if (!file.isFile) {
-          await Directory(target).create(recursive: true);
-          continue;
-        }
-
-        await Directory(p.dirname(target)).create(recursive: true);
-        final output = OutputFileStream(target);
-        file.writeContent(output);
-        await output.close();
-        file.clear();
-        extracted += 1;
-        yield ResourceUpdateEvent(
-          stage: ResourceUpdateStage.extractingAssets,
-          message: '正在解压资源 $extracted / ${files.length}',
-          progress: files.isEmpty ? null : extracted / files.length,
-        );
-      }
-      await input.close();
-      await archive.clear();
-
-      final catalog = File(p.join(staging.path, 'catalog', 'songs.json'));
-      if (!await catalog.exists()) {
-        throw const FileSystemException('资源包中缺少 catalog/songs.json');
-      }
-
-      yield const ResourceUpdateEvent(
-        stage: ResourceUpdateStage.writingCatalog,
-        message: '正在写入本地资源库',
+        stage: ResourceUpdateStage.extractingMetadata,
+        message: 'APK 已下载，下一步执行端内资源解析',
         progress: 1,
       );
 
-      if (await root.exists()) {
-        await root.delete(recursive: true);
-      }
-      await staging.rename(root.path);
-
-      yield const ResourceUpdateEvent(
-        stage: ResourceUpdateStage.complete,
-        message: '资源库已更新',
-        progress: 1,
+      yield ResourceUpdateEvent(
+        stage: ResourceUpdateStage.failed,
+        message: '端内 APK 解析器尚未接入；已完成 APK 下载，文件保存在应用私有目录：${apk.path}',
       );
     } on Object catch (error) {
-      if (await staging.exists()) {
-        await staging.delete(recursive: true);
-      }
       yield ResourceUpdateEvent(
         stage: ResourceUpdateStage.failed,
         message: error.toString(),
@@ -317,22 +302,6 @@ class ResourceUpdateService {
     } finally {
       client.close(force: true);
     }
-  }
-
-  String? _normalizedArchivePath(String name) {
-    final normalized = p.posix.normalize(name).replaceAll('\\', '/');
-    if (normalized == '.' ||
-        normalized.startsWith('/') ||
-        normalized.startsWith('../') ||
-        normalized.contains('/../')) {
-      return null;
-    }
-
-    const rootPrefix = 'phigros_library/';
-    if (normalized.startsWith(rootPrefix)) {
-      return normalized.substring(rootPrefix.length);
-    }
-    return normalized;
   }
 
   static String _formatBytes(int bytes) {
