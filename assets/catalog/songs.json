@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": null,
+  "source": "Run tools/phigros_updater.py to build a current local library.",
+  "apkVersionName": null,
+  "apkVersionCode": null,
+  "songs": []
+}

@@ -1,0 +1,12 @@
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.idea/
+*.iml
+.phigros_library/
+.venv/
+.toolchains/
+.local/
+build/
+__pycache__/
+*.pyc
