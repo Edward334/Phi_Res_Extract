@@ -22,7 +22,7 @@ jobs:
           python-version: "3.12"
 
       - name: Resolve latest TapTap APK
-        run: python tools/phigros_updater.py resolve-apk > taptap-apk.json
+        run: python tools/phigros_updater.py resolve-apk --compact > taptap-apk.json
 
       - name: Publish APK metadata
         uses: softprops/action-gh-release@v2

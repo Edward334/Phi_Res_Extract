@@ -80,6 +80,20 @@ def load_taptap_metadata(path: Path) -> dict[str, Any]:
     return payload
 
 
+def compact_apk_payload(url: str, metadata: dict[str, Any]) -> dict[str, Any]:
+    app = metadata.get("app", {}).get("data", {}) or {}
+    apk = apk_info_from_metadata(metadata)
+    return {
+        "url": url,
+        "name": apk.get("name"),
+        "versionName": apk.get("version_name"),
+        "versionCode": apk.get("version_code"),
+        "size": apk.get("size"),
+        "md5": apk.get("md5"),
+        "updateDate": app.get("update_date"),
+    }
+
+
 def fetch_json(url: str) -> dict[str, Any]:
     request = urllib.request.Request(url, headers={"User-Agent": "phigros-library-updater"})
     with urllib.request.urlopen(request, timeout=30) as response:
@@ -701,7 +715,10 @@ def run_update(args: argparse.Namespace) -> None:
 def run_resolve_apk(args: argparse.Namespace) -> None:
     out = Path(args.out) if args.out else None
     url, metadata = latest_apk_url()
-    payload = {"url": url, "metadata": metadata}
+    if args.compact:
+        payload = compact_apk_payload(url, metadata)
+    else:
+        payload = {"url": url, "metadata": metadata}
     text = json.dumps(payload, ensure_ascii=False, indent=2)
     if out:
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -715,6 +732,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     resolve = subparsers.add_parser("resolve-apk")
     resolve.add_argument("--out", help="Optional path for latest APK metadata JSON.")
+    resolve.add_argument(
+        "--compact",
+        action="store_true",
+        help="Only print the APK download URL and fields needed by the app.",
+    )
     resolve.set_defaults(func=run_resolve_apk)
 
     update = subparsers.add_parser("update")

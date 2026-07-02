@@ -50,6 +50,16 @@ class ApkRelease {
   }
 
   factory ApkRelease.fromUpdaterJson(Map<String, dynamic> json) {
+    if (!json.containsKey('metadata')) {
+      return ApkRelease(
+        versionName: json['versionName'] as String? ?? 'unknown',
+        versionCode: (json['versionCode'] as num?)?.toInt() ?? 0,
+        updateDate: json['updateDate'] as String? ?? '',
+        size: (json['size'] as num?)?.toInt() ?? 0,
+        url: json['url'] as String? ?? '',
+      );
+    }
+
     final app =
         json['metadata']?['app']?['data'] as Map<String, dynamic>? ?? {};
     final apk =

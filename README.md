@@ -16,6 +16,7 @@ Install the APK from the `phi-res-extract-android-debug` artifact. The Android
 package does not bundle TapTap, the Phigros APK, or extracted resources. The
 `APK Metadata` workflow only resolves the latest official APK download address
 and publishes a small `taptap-apk.json` file under the `apk-latest` release.
+The JSON contains only the URL, version, size, MD5, and update date.
 
 On Android, tap `下载 APK`. The app fetches that JSON, downloads the APK at
 runtime into its private data directory, and shows download progress. APK
