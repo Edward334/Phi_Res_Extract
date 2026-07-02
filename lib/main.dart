@@ -19,7 +19,7 @@ class PhigrosLibraryApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Phigros Library',
+      title: 'Phigros 资源库',
       debugShowCheckedModeBanner: false,
       theme: MyTheme.dark(),
       home: LibraryHome(repository: repository),
@@ -37,13 +37,11 @@ class LibraryHome extends StatefulWidget {
 }
 
 class _LibraryHomeState extends State<LibraryHome> {
-  late final _repository = widget.repository ?? CatalogRepository();
+  CatalogRepository? _repository;
   final _player = AudioPlayer();
-  late final _exporter = PhiraExportService(_repository);
-  late final _updater = ResourceUpdateService(
-    libraryRoot: _repository.libraryRoot,
-  );
-  late Future<SongCatalog> _catalog;
+  PhiraExportService? _exporter;
+  ResourceUpdateService? _updater;
+  Future<SongCatalog>? _catalog;
   Song? _selected;
   String _filter = '';
   PlayerState _playerState = PlayerState.stopped;
@@ -53,11 +51,26 @@ class _LibraryHomeState extends State<LibraryHome> {
   @override
   void initState() {
     super.initState();
-    _catalog = _repository.load();
+    _initializeLibrary();
     _player.onPlayerStateChanged.listen((state) {
       if (mounted) {
         setState(() => _playerState = state);
       }
+    });
+  }
+
+  Future<void> _initializeLibrary() async {
+    final repository =
+        widget.repository ?? await CatalogRepository.createDefault();
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _repository = repository;
+      _exporter = PhiraExportService(repository);
+      _updater = ResourceUpdateService(libraryRoot: repository.libraryRoot);
+      _catalog = repository.load();
     });
   }
 
@@ -69,8 +82,18 @@ class _LibraryHomeState extends State<LibraryHome> {
 
   @override
   Widget build(BuildContext context) {
+    final repository = _repository;
+    final catalogFuture = _catalog;
+    if (repository == null || catalogFuture == null) {
+      return const Scaffold(
+        body: SafeArea(
+          child: Center(child: CircularProgressIndicator()),
+        ),
+      );
+    }
+
     return FutureBuilder<SongCatalog>(
-      future: _catalog,
+      future: catalogFuture,
       builder: (context, snapshot) {
         final catalog = snapshot.data;
         final songs = _filteredSongs(catalog?.songs ?? const []);
@@ -78,10 +101,10 @@ class _LibraryHomeState extends State<LibraryHome> {
 
         return Scaffold(
           appBar: AppBar(
-            title: const Text('Phigros Library'),
+            title: const Text('Phigros 资源库'),
             actions: [
               IconButton(
-                tooltip: 'Check latest APK',
+                tooltip: '同步资源',
                 onPressed: _updating ? null : () => _showUpdateSheet(catalog),
                 icon: const Icon(Icons.sync),
               ),
@@ -89,9 +112,7 @@ class _LibraryHomeState extends State<LibraryHome> {
                 padding: const EdgeInsets.only(right: 16),
                 child: Center(
                   child: Text(
-                    catalog == null
-                        ? 'Loading'
-                        : '${catalog.songs.length} songs',
+                    catalog == null ? '加载中' : '${catalog.songs.length} 首',
                     style: Theme.of(context).textTheme.labelLarge,
                   ),
                 ),
@@ -119,7 +140,11 @@ class _LibraryHomeState extends State<LibraryHome> {
                       }
 
                       if (catalog == null || catalog.songs.isEmpty) {
-                        return const _EmptyState();
+                        return _EmptyState(
+                          onUpdate: _updating
+                              ? null
+                              : () => _showUpdateSheet(catalog),
+                        );
                       }
 
                       final list = SongListPane(
@@ -134,7 +159,7 @@ class _LibraryHomeState extends State<LibraryHome> {
                         child: SongDetailsPane(
                           key: ValueKey(selected?.id),
                           song: selected,
-                          repository: _repository,
+                          repository: repository,
                           playerState: _playerState,
                           onTogglePlay: selected == null
                               ? null
@@ -192,11 +217,11 @@ class _LibraryHomeState extends State<LibraryHome> {
       return;
     }
 
-    final music = _repository.resolveFile(song.musicPath);
+    final music = _repository?.resolveFile(song.musicPath);
     if (music == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Music file is not available.')),
+          const SnackBar(content: Text('音乐文件不可用，请先下载完整资源。')),
         );
       }
       return;
@@ -207,12 +232,12 @@ class _LibraryHomeState extends State<LibraryHome> {
 
   Future<void> _exportPhiraPackage(Song song) async {
     try {
-      final result = _exporter.exportSong(song);
+      final result = _exporter!.exportSong(song);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'Exported ${result.exported} package(s), skipped ${result.skipped}.',
+              '已导出 ${result.exported} 个谱面，跳过 ${result.skipped} 个。',
             ),
           ),
         );
@@ -225,17 +250,26 @@ class _LibraryHomeState extends State<LibraryHome> {
   }
 
   Future<void> _showUpdateSheet(SongCatalog? catalog) async {
+    final updater = _updater;
+    if (updater == null) {
+      return;
+    }
+
     setState(() => _updating = true);
     ApkRelease? release;
     Object? error;
-    try {
-      release = await _updater.resolveLatest();
-    } on Object catch (caught) {
-      error = caught;
-    } finally {
-      if (mounted) {
-        setState(() => _updating = false);
+    if (!updater.usesResourceBundle) {
+      try {
+        release = await updater.resolveLatest();
+      } on Object catch (caught) {
+        error = caught;
+      } finally {
+        if (mounted) {
+          setState(() => _updating = false);
+        }
       }
+    } else if (mounted) {
+      setState(() => _updating = false);
     }
 
     if (mounted) {
@@ -247,8 +281,9 @@ class _LibraryHomeState extends State<LibraryHome> {
             catalog: catalog,
             release: release,
             error: error,
-            canUpdate: _updater.canUpdate,
+            canUpdate: updater.canUpdate,
             updating: _updating,
+            usesResourceBundle: updater.usesResourceBundle,
             onCatalogOnlyUpdate: () => _runUpdate(catalogOnly: true),
             onFullUpdate: () => _runUpdate(catalogOnly: false),
           );
@@ -258,19 +293,27 @@ class _LibraryHomeState extends State<LibraryHome> {
   }
 
   Future<void> _runUpdate({required bool catalogOnly}) async {
-    Navigator.of(context).pop();
+    final repository = _repository;
+    final updater = _updater;
+    if (repository == null || updater == null) {
+      return;
+    }
+
+    if (Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+    }
     final messenger = ScaffoldMessenger.of(context);
     setState(() {
       _updating = true;
       _updateEvent = const ResourceUpdateEvent(
         stage: ResourceUpdateStage.resolving,
-        message: 'Preparing update',
+        message: '正在准备更新',
       );
     });
     try {
       var success = false;
       var output = '';
-      await for (final event in _updater.updateLibraryStream(
+      await for (final event in updater.updateLibraryStream(
         catalogOnly: catalogOnly,
       )) {
         if (mounted) {
@@ -284,15 +327,14 @@ class _LibraryHomeState extends State<LibraryHome> {
       }
 
       if (!success) {
-        messenger
-            .showSnackBar(SnackBar(content: Text('Update failed: $output')));
+        messenger.showSnackBar(SnackBar(content: Text('更新失败：$output')));
         return;
       }
       setState(() {
-        _catalog = _repository.load();
+        _catalog = repository.load();
         _selected = null;
       });
-      messenger.showSnackBar(const SnackBar(content: Text('Library updated.')));
+      messenger.showSnackBar(const SnackBar(content: Text('资源库已更新。')));
     } on Object catch (error) {
       messenger.showSnackBar(SnackBar(content: Text(error.toString())));
     } finally {
@@ -328,7 +370,7 @@ class SongListPane extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
           child: SearchBar(
             leading: const Icon(Icons.search),
-            hintText: 'Search song, id, composer',
+            hintText: '搜索曲名、ID、曲师',
             onChanged: onFilterChanged,
           ),
         ),
@@ -424,20 +466,20 @@ class SongDetailsPane extends StatelessWidget {
                     : Icons.play_arrow,
               ),
               label: Text(
-                playerState == PlayerState.playing ? 'Pause' : 'Play',
+                playerState == PlayerState.playing ? '暂停' : '播放',
               ),
             ),
             OutlinedButton.icon(
               onPressed: onExportPhira,
               icon: const Icon(Icons.archive),
-              label: const Text('Export Phira'),
+              label: const Text('导出 Phira'),
             ),
           ],
         ),
         const SizedBox(height: 24),
         _InfoGrid(song: song!),
         const SizedBox(height: 24),
-        Text('Levels', style: Theme.of(context).textTheme.titleMedium),
+        Text('难度', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
         for (final level in song!.levels) _LevelTile(level: level),
       ],
@@ -456,9 +498,9 @@ class _InfoGrid extends StatelessWidget {
       spacing: 12,
       runSpacing: 12,
       children: [
-        _InfoChip(label: 'Composer', value: song.composer),
-        _InfoChip(label: 'Illustrator', value: song.illustrator),
-        _InfoChip(label: 'Charts', value: song.levels.length.toString()),
+        _InfoChip(label: '曲师', value: song.composer),
+        _InfoChip(label: '画师', value: song.illustrator),
+        _InfoChip(label: '谱面数', value: song.levels.length.toString()),
       ],
     );
   }
@@ -522,6 +564,7 @@ class _UpdateSheet extends StatelessWidget {
     required this.error,
     required this.canUpdate,
     required this.updating,
+    required this.usesResourceBundle,
     required this.onCatalogOnlyUpdate,
     required this.onFullUpdate,
   });
@@ -531,6 +574,7 @@ class _UpdateSheet extends StatelessWidget {
   final Object? error;
   final bool canUpdate;
   final bool updating;
+  final bool usesResourceBundle;
   final VoidCallback onCatalogOnlyUpdate;
   final VoidCallback onFullUpdate;
 
@@ -538,7 +582,7 @@ class _UpdateSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     final generatedAt = catalog?.generatedAt;
     final localVersion = catalog?.apkVersionName == null
-        ? 'unknown APK'
+        ? '未知 APK'
         : '${catalog!.apkVersionName} (${catalog!.apkVersionCode ?? 0})';
 
     return SafeArea(
@@ -549,43 +593,49 @@ class _UpdateSheet extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Resource update',
+              '资源同步',
               style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 16),
             _InfoChip(
-              label: 'Local catalog',
+              label: '本地目录',
               value: generatedAt == null
-                  ? '${catalog?.songs.length ?? 0} songs, $localVersion'
-                  : '${catalog?.songs.length ?? 0} songs, $localVersion, ${generatedAt.toLocal()}',
+                  ? '${catalog?.songs.length ?? 0} 首，$localVersion'
+                  : '${catalog?.songs.length ?? 0} 首，$localVersion，${generatedAt.toLocal()}',
             ),
             const SizedBox(height: 12),
-            if (release != null)
+            if (usesResourceBundle)
+              const _InfoChip(
+                label: '在线资源包',
+                value: '由 GitHub Actions 通过 TapTap 下载 APK 后解包生成，下载后会保存到应用本地目录。',
+              )
+            else if (release != null)
               _InfoChip(
-                label: 'Latest APK',
+                label: '最新 APK',
                 value:
                     '${release!.versionName} (${release!.versionCode}), ${release!.sizeLabel}',
               )
             else
               _InfoChip(
-                label: 'Latest APK',
-                value: error == null ? 'Checking failed.' : error.toString(),
+                label: '最新 APK',
+                value: error == null ? '检查失败。' : error.toString(),
               ),
             const SizedBox(height: 20),
             Wrap(
               spacing: 10,
               runSpacing: 10,
               children: [
+                if (!usesResourceBundle)
+                  FilledButton.icon(
+                    onPressed:
+                        canUpdate && !updating ? onCatalogOnlyUpdate : null,
+                    icon: const Icon(Icons.library_music),
+                    label: const Text('仅更新目录'),
+                  ),
                 FilledButton.icon(
-                  onPressed:
-                      canUpdate && !updating ? onCatalogOnlyUpdate : null,
-                  icon: const Icon(Icons.library_music),
-                  label: const Text('Update catalog'),
-                ),
-                OutlinedButton.icon(
                   onPressed: canUpdate && !updating ? onFullUpdate : null,
                   icon: const Icon(Icons.download),
-                  label: const Text('Download and extract'),
+                  label: Text(usesResourceBundle ? '下载资源' : '下载并解包'),
                 ),
               ],
             ),
@@ -604,7 +654,7 @@ class _UpdateStatusBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final progress = event?.progress;
-    final message = event?.message ?? 'Updating library';
+    final message = event?.message ?? '正在更新资源库';
     final stage = event?.stage ?? ResourceUpdateStage.resolving;
 
     return Container(
@@ -648,13 +698,13 @@ class _UpdateStatusBanner extends StatelessWidget {
 
   static String _stageLabel(ResourceUpdateStage stage) {
     return switch (stage) {
-      ResourceUpdateStage.resolving => 'Checking source',
-      ResourceUpdateStage.downloading => 'Downloading APK',
-      ResourceUpdateStage.extractingMetadata => 'Reading song metadata',
-      ResourceUpdateStage.extractingAssets => 'Extracting resources',
-      ResourceUpdateStage.writingCatalog => 'Writing catalog',
-      ResourceUpdateStage.complete => 'Update complete',
-      ResourceUpdateStage.failed => 'Update failed',
+      ResourceUpdateStage.resolving => '检查资源来源',
+      ResourceUpdateStage.downloading => '下载资源',
+      ResourceUpdateStage.extractingMetadata => '读取曲目信息',
+      ResourceUpdateStage.extractingAssets => '解压资源',
+      ResourceUpdateStage.writingCatalog => '写入目录',
+      ResourceUpdateStage.complete => '更新完成',
+      ResourceUpdateStage.failed => '更新失败',
     };
   }
 
@@ -672,17 +722,42 @@ class _UpdateStatusBanner extends StatelessWidget {
 }
 
 class _EmptyState extends StatelessWidget {
-  const _EmptyState();
+  const _EmptyState({this.onUpdate});
+
+  final VoidCallback? onUpdate;
 
   @override
   Widget build(BuildContext context) {
     return Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 420),
-        child: Text(
-          'No songs found. Run tools/phigros_updater.py and pass PHIGROS_LIBRARY.',
-          textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.bodyLarge,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.library_music,
+              size: 48,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              '本地还没有资源',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '点击下载资源后，应用会获取由 TapTap APK 解包生成的资源包，并显示曲目、曲绘、音乐和谱面信息。',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 20),
+            FilledButton.icon(
+              onPressed: onUpdate,
+              icon: const Icon(Icons.download),
+              label: const Text('下载资源'),
+            ),
+          ],
         ),
       ),
     );

@@ -10,14 +10,14 @@ void main() {
     }
 
     await tester.pumpWidget(
-      PhigrosLibraryApp(
+      const PhigrosLibraryApp(
         repository: CatalogRepository(libraryRoot: libraryRoot),
       ),
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Phigros Library'), findsOneWidget);
-    expect(find.textContaining('No songs found'), findsOneWidget);
+    expect(find.text('Phigros 资源库'), findsOneWidget);
+    expect(find.textContaining('本地还没有资源'), findsOneWidget);
   });
 
   test('loads generated library when configured', () async {
@@ -26,7 +26,7 @@ void main() {
       return;
     }
 
-    final repository = CatalogRepository(libraryRoot: libraryRoot);
+    const repository = CatalogRepository(libraryRoot: libraryRoot);
     final catalog = await repository.load();
     expect(catalog.songs.length, 308);
     expect(

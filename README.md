@@ -10,6 +10,21 @@ and manual dispatch:
 - Android debug APK: `phi-res-extract-android-debug`
 - Linux debug bundle: `phi-res-extract-linux-debug`
 
+## Android usage
+
+Install the APK from the `phi-res-extract-android-debug` artifact. On first
+launch the app has no bundled Phigros resources, because the full library is too
+large to ship inside the APK. Tap `下载资源`; the app downloads
+`phigros-library.zip` from the fixed `resources-latest` release, unpacks it into
+the app private data directory, then refreshes the song list.
+
+The `Resource Bundle` workflow creates that release asset by downloading the
+latest TapTap APK, extracting charts, illustrations, and music, validating the
+catalog, and publishing:
+
+- `phigros-library.zip`
+- `phigros-library.sha256`
+
 Local Linux build:
 
 ```bash

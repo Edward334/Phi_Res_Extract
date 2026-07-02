@@ -1,6 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:archive/archive_io.dart';
+import 'package:path/path.dart' as p;
+
 enum ResourceUpdateStage {
   resolving,
   downloading,
@@ -84,13 +87,20 @@ class ResourceUpdateService {
       'PYTHON',
       defaultValue: 'python',
     ),
+    this.resourceBundleUrl = const String.fromEnvironment(
+      'PHIGROS_RESOURCE_BUNDLE',
+      defaultValue:
+          'https://github.com/Edward334/Phi_Res_Extract/releases/download/resources-latest/phigros-library.zip',
+    ),
   });
 
   final String libraryRoot;
   final String scriptPath;
   final String pythonExecutable;
+  final String resourceBundleUrl;
 
   bool get canUpdate => libraryRoot.trim().isNotEmpty;
+  bool get usesResourceBundle => Platform.isAndroid;
 
   Future<ApkRelease> resolveLatest() async {
     final result = await Process.run(
@@ -131,6 +141,11 @@ class ResourceUpdateService {
   }) async* {
     if (!canUpdate) {
       throw StateError('PHIGROS_LIBRARY is required before updating.');
+    }
+
+    if (usesResourceBundle) {
+      yield* _downloadResourceBundleStream();
+      return;
     }
 
     final args = [
@@ -181,6 +196,156 @@ class ResourceUpdateService {
         output: output.toString(),
       );
     }
+  }
+
+  Stream<ResourceUpdateEvent> _downloadResourceBundleStream() async* {
+    final root = Directory(libraryRoot);
+    final parent = root.parent;
+    await parent.create(recursive: true);
+
+    final zip = File(p.join(parent.path, 'phigros-library.zip'));
+    final part = File('${zip.path}.part');
+    final staging = Directory('${root.path}.staging');
+
+    yield const ResourceUpdateEvent(
+      stage: ResourceUpdateStage.resolving,
+      message: '正在连接在线资源包',
+    );
+
+    final uri = Uri.parse(resourceBundleUrl);
+    final client = HttpClient();
+    try {
+      final request = await client.getUrl(uri);
+      final response = await request.close();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw HttpException(
+          '资源包下载失败：HTTP ${response.statusCode}',
+          uri: uri,
+        );
+      }
+
+      final total = response.contentLength;
+      var downloaded = 0;
+      final sink = part.openWrite();
+      await for (final chunk in response) {
+        downloaded += chunk.length;
+        sink.add(chunk);
+        yield ResourceUpdateEvent(
+          stage: ResourceUpdateStage.downloading,
+          message: total > 0
+              ? '正在下载资源包 ${_formatBytes(downloaded)} / ${_formatBytes(total)}'
+              : '正在下载资源包 ${_formatBytes(downloaded)}',
+          progress: total > 0 ? downloaded / total : null,
+        );
+      }
+      await sink.close();
+      if (await zip.exists()) {
+        await zip.delete();
+      }
+      await part.rename(zip.path);
+
+      if (await staging.exists()) {
+        await staging.delete(recursive: true);
+      }
+      await staging.create(recursive: true);
+
+      yield const ResourceUpdateEvent(
+        stage: ResourceUpdateStage.extractingAssets,
+        message: '正在解压资源包',
+      );
+
+      final input = InputFileStream(zip.path);
+      final archive = ZipDecoder().decodeBuffer(input);
+      final files = archive.files.where((file) => file.isFile).toList();
+      var extracted = 0;
+      for (final file in archive.files) {
+        final name = _normalizedArchivePath(file.name);
+        if (name == null) {
+          continue;
+        }
+        final target = p.join(staging.path, name);
+
+        if (!file.isFile) {
+          await Directory(target).create(recursive: true);
+          continue;
+        }
+
+        await Directory(p.dirname(target)).create(recursive: true);
+        final output = OutputFileStream(target);
+        file.writeContent(output);
+        await output.close();
+        file.clear();
+        extracted += 1;
+        yield ResourceUpdateEvent(
+          stage: ResourceUpdateStage.extractingAssets,
+          message: '正在解压资源 $extracted / ${files.length}',
+          progress: files.isEmpty ? null : extracted / files.length,
+        );
+      }
+      await input.close();
+      await archive.clear();
+
+      final catalog = File(p.join(staging.path, 'catalog', 'songs.json'));
+      if (!await catalog.exists()) {
+        throw const FileSystemException('资源包中缺少 catalog/songs.json');
+      }
+
+      yield const ResourceUpdateEvent(
+        stage: ResourceUpdateStage.writingCatalog,
+        message: '正在写入本地资源库',
+        progress: 1,
+      );
+
+      if (await root.exists()) {
+        await root.delete(recursive: true);
+      }
+      await staging.rename(root.path);
+
+      yield const ResourceUpdateEvent(
+        stage: ResourceUpdateStage.complete,
+        message: '资源库已更新',
+        progress: 1,
+      );
+    } on Object catch (error) {
+      if (await staging.exists()) {
+        await staging.delete(recursive: true);
+      }
+      yield ResourceUpdateEvent(
+        stage: ResourceUpdateStage.failed,
+        message: error.toString(),
+      );
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  String? _normalizedArchivePath(String name) {
+    final normalized = p.posix.normalize(name).replaceAll('\\', '/');
+    if (normalized == '.' ||
+        normalized.startsWith('/') ||
+        normalized.startsWith('../') ||
+        normalized.contains('/../')) {
+      return null;
+    }
+
+    const rootPrefix = 'phigros_library/';
+    if (normalized.startsWith(rootPrefix)) {
+      return normalized.substring(rootPrefix.length);
+    }
+    return normalized;
+  }
+
+  static String _formatBytes(int bytes) {
+    if (bytes >= 1024 * 1024 * 1024) {
+      return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
+    }
+    if (bytes >= 1024 * 1024) {
+      return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+    }
+    if (bytes >= 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    }
+    return '$bytes B';
   }
 
   ResourceUpdateEvent _eventFromLine(String line, String output) {
