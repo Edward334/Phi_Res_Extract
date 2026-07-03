@@ -64,7 +64,11 @@ class Song {
   List<ChartLevel> get levels {
     final codes = <String>[
       for (var index = 0; index < difficulties.length; index += 1)
-        index < chartLevels.length ? chartLevels[index] : 'L$index',
+        if (difficulties[index] > 0 ||
+            chartPaths.containsKey(
+              index < chartLevels.length ? chartLevels[index] : 'L$index',
+            ))
+          index < chartLevels.length ? chartLevels[index] : 'L$index',
       for (var index = 0; index < chartLevels.length; index += 1)
         if (chartPaths.containsKey(chartLevels[index]) &&
             difficulties.length <= index)
@@ -87,7 +91,7 @@ class Song {
     if (index < 0 || index >= difficulties.length) {
       return null;
     }
-    return difficulties[index];
+    return difficulties[index] > 0 ? difficulties[index] : null;
   }
 
   String _charterFor(String code) {

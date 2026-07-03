@@ -27,6 +27,34 @@ class UnityTextAsset {
   String get text => utf8.decode(bytes);
 }
 
+class UnitySerializedObject {
+  const UnitySerializedObject({
+    required this.pathId,
+    required this.classId,
+    required this.typeId,
+    required this.endian,
+    required this.data,
+  });
+
+  final int pathId;
+  final int classId;
+  final int typeId;
+  final Endian endian;
+  final Uint8List data;
+}
+
+class UnitySerializedFile {
+  const UnitySerializedFile({
+    required this.version,
+    required this.endian,
+    required this.objects,
+  });
+
+  final int version;
+  final Endian endian;
+  final List<UnitySerializedObject> objects;
+}
+
 class UnityFsReader {
   const UnityFsReader();
 
@@ -147,6 +175,14 @@ class UnitySerializedFileReader {
   const UnitySerializedFileReader();
 
   List<UnityTextAsset> readTextAssets(Uint8List source) {
+    final file = readFile(source);
+    return [
+      for (final object in file.objects)
+        if (object.classId == 49) _readTextAsset(object.data, object.endian),
+    ];
+  }
+
+  UnitySerializedFile readFile(Uint8List source) {
     var reader = _BinaryReader(source);
     var metadataSize = reader.readUint32();
     reader.readUint32();
@@ -196,16 +232,17 @@ class UnitySerializedFileReader {
       bigIdEnabled = reader.readInt32() != 0;
     }
 
-    final objects = <_SerializedObject>[];
+    final objects = <UnitySerializedObject>[];
     final objectCount = reader.readInt32();
     for (var index = 0; index < objectCount; index += 1) {
+      final int pathId;
       if (bigIdEnabled) {
-        reader.readUint64();
+        pathId = reader.readUint64();
       } else if (version < 14) {
-        reader.readInt32();
+        pathId = reader.readInt32();
       } else {
         reader.align(4);
-        reader.readUint64();
+        pathId = reader.readUint64();
       }
 
       final byteStart =
@@ -225,22 +262,26 @@ class UnitySerializedFileReader {
         reader.readByte();
       }
 
-      if (classId == 49) {
-        objects.add(_SerializedObject(byteStart, byteSize));
-      }
+      objects.add(
+        UnitySerializedObject(
+          pathId: pathId,
+          classId: classId,
+          typeId: typeId,
+          endian: endian,
+          data: Uint8List.sublistView(
+            source,
+            byteStart,
+            byteStart + byteSize,
+          ),
+        ),
+      );
     }
 
-    return [
-      for (final object in objects)
-        _readTextAsset(
-          Uint8List.sublistView(
-            source,
-            object.offset,
-            object.offset + object.size,
-          ),
-          endian,
-        ),
-    ];
+    return UnitySerializedFile(
+      version: version,
+      endian: endian,
+      objects: objects,
+    );
   }
 
   int _readSerializedType(
@@ -299,11 +340,167 @@ class UnitySerializedFileReader {
   }
 }
 
-class _SerializedObject {
-  const _SerializedObject(this.offset, this.size);
+class UnityTypeTreeReader {
+  const UnityTypeTreeReader();
 
-  final int offset;
-  final int size;
+  Map<String, dynamic> readObject(
+    Uint8List source,
+    List<dynamic> nodes, {
+    required Endian endian,
+  }) {
+    if (nodes.isEmpty) {
+      throw const FormatException('Unity type tree is empty.');
+    }
+    final root = _TypeTreeNode.fromList(nodes);
+    final value = _readValue(root, _BinaryReader(source, endian: endian));
+    if (value is! Map<String, dynamic>) {
+      throw const FormatException(
+          'Unity type tree root did not read an object.');
+    }
+    return value;
+  }
+
+  dynamic _readValue(_TypeTreeNode node, _BinaryReader reader) {
+    final align = node.aligned;
+    dynamic value;
+
+    switch (node.type) {
+      case 'SInt8':
+        value = reader.readInt8();
+      case 'UInt8':
+      case 'char':
+        value = reader.readByte();
+      case 'short':
+      case 'SInt16':
+        value = reader.readInt16();
+      case 'unsigned short':
+      case 'UInt16':
+        value = reader.readUint16();
+      case 'int':
+      case 'SInt32':
+        value = reader.readInt32();
+      case 'unsigned int':
+      case 'UInt32':
+      case 'Type*':
+        value = reader.readUint32();
+      case 'long long':
+      case 'SInt64':
+        value = reader.readInt64();
+      case 'unsigned long long':
+      case 'UInt64':
+      case 'FileSize':
+        value = reader.readUint64();
+      case 'float':
+        value = reader.readFloat32();
+      case 'double':
+        value = reader.readFloat64();
+      case 'bool':
+        value = reader.readByte() != 0;
+      case 'string':
+        value = reader.readAlignedString();
+      case 'TypelessData':
+        value = reader.readBytes(reader.readInt32());
+      case 'pair':
+        value = [
+          _readValue(node.children[0], reader),
+          _readValue(node.children[1], reader),
+        ];
+      default:
+        if (node.children.isNotEmpty && node.children.first.type == 'Array') {
+          value = _readVector(node, reader);
+        } else {
+          value = <String, dynamic>{
+            for (final child in node.children)
+              child.name: _readValue(child, reader),
+          };
+        }
+    }
+
+    if (align) {
+      reader.align(4);
+    }
+    return value;
+  }
+
+  List<dynamic> _readVector(_TypeTreeNode node, _BinaryReader reader) {
+    final array = node.children.first;
+    final size = reader.readInt32();
+    if (size < 0) {
+      throw const FormatException('Negative Unity array size.');
+    }
+    if (array.children.length < 2) {
+      throw const FormatException(
+          'Unity array node is missing its data child.');
+    }
+    final subtype = array.children[1];
+    final values = [
+      for (var index = 0; index < size; index += 1)
+        _readValueWithoutTrailingAlign(subtype, reader),
+    ];
+    if (array.aligned || subtype.aligned) {
+      reader.align(4);
+    }
+    return values;
+  }
+
+  dynamic _readValueWithoutTrailingAlign(
+    _TypeTreeNode node,
+    _BinaryReader reader,
+  ) {
+    if (node.type == 'bool') {
+      return reader.readByte() != 0;
+    }
+    if (node.type == 'UInt8' || node.type == 'char') {
+      return reader.readByte();
+    }
+    if (node.type == 'SInt8') {
+      return reader.readInt8();
+    }
+    return _readValue(node, reader);
+  }
+}
+
+class _TypeTreeNode {
+  _TypeTreeNode({
+    required this.type,
+    required this.name,
+    required this.level,
+    required this.metaFlag,
+  });
+
+  final String type;
+  final String name;
+  final int level;
+  final int metaFlag;
+  final children = <_TypeTreeNode>[];
+
+  bool get aligned => metaFlag & 0x4000 != 0;
+
+  static _TypeTreeNode fromList(List<dynamic> nodes) {
+    final stack = <_TypeTreeNode>[];
+    _TypeTreeNode? root;
+    for (final raw in nodes.cast<Map<String, dynamic>>()) {
+      final node = _TypeTreeNode(
+        type: raw['m_Type'] as String? ?? '',
+        name: raw['m_Name'] as String? ?? '',
+        level: (raw['m_Level'] as num?)?.toInt() ?? 0,
+        metaFlag: (raw['m_MetaFlag'] as num?)?.toInt() ?? 0,
+      );
+      while (stack.isNotEmpty && stack.last.level >= node.level) {
+        stack.removeLast();
+      }
+      if (stack.isEmpty) {
+        root = node;
+      } else {
+        stack.last.children.add(node);
+      }
+      stack.add(node);
+    }
+    if (root == null) {
+      throw const FormatException('Unity type tree did not contain a root.');
+    }
+    return root;
+  }
 }
 
 class _UnityFsBlock {
@@ -349,6 +546,12 @@ class _BinaryReader {
     return value;
   }
 
+  int readInt8() {
+    final value = ByteData.sublistView(data, position, position + 1).getInt8(0);
+    position += 1;
+    return value;
+  }
+
   int readInt16() {
     final value =
         ByteData.sublistView(data, position, position + 2).getInt16(0, endian);
@@ -380,6 +583,27 @@ class _BinaryReader {
   int readUint64() {
     final value =
         ByteData.sublistView(data, position, position + 8).getUint64(0, endian);
+    position += 8;
+    return value;
+  }
+
+  int readInt64() {
+    final value =
+        ByteData.sublistView(data, position, position + 8).getInt64(0, endian);
+    position += 8;
+    return value;
+  }
+
+  double readFloat32() {
+    final value = ByteData.sublistView(data, position, position + 4)
+        .getFloat32(0, endian);
+    position += 4;
+    return value;
+  }
+
+  double readFloat64() {
+    final value = ByteData.sublistView(data, position, position + 8)
+        .getFloat64(0, endian);
     position += 8;
     return value;
   }

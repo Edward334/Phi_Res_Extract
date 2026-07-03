@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 
 import '../models/song.dart';
 import 'apk_addressables_reader.dart';
+import 'game_information_reader.dart';
 import 'unity_fs_reader.dart';
 
 enum ResourceUpdateStage {
@@ -114,6 +115,7 @@ class ResourceUpdateService {
   final String pythonExecutable;
   final String apkMetadataUrl;
   final _addressablesReader = const ApkAddressablesReader();
+  final _gameInformationReader = const GameInformationReader();
   final _unityFsReader = const UnityFsReader();
   final _serializedReader = const UnitySerializedFileReader();
 
@@ -325,6 +327,13 @@ class ResourceUpdateService {
         encoding: utf8,
       );
 
+      yield const ResourceUpdateEvent(
+        stage: ResourceUpdateStage.extractingMetadata,
+        message: '正在端内解析曲目信息',
+        progress: 1,
+      );
+      final songInfo = await _gameInformationReader.readSongs(apk);
+
       final chartAssets = assets.where(_isChartAsset).toList();
       if (chartAssets.isEmpty) {
         throw const FormatException('Addressables 中没有找到谱面资源');
@@ -424,20 +433,7 @@ class ResourceUpdateService {
       final generatedAt = DateTime.now().toUtc().toIso8601String();
       final songs = [
         for (final entry in chartsBySong.entries)
-          {
-            'id': entry.key,
-            'title': entry.key,
-            'composer': '',
-            'illustrator': '',
-            'charters': const <String>[],
-            'difficulties': const <double>[],
-            'illustrationPath': null,
-            'musicPath': null,
-            'chartPaths': {
-              for (final level in chartLevels)
-                if (entry.value[level] case final path?) level: path,
-            },
-          },
+          _catalogSongJson(entry.key, entry.value, songInfo[entry.key]),
       ]..sort((left, right) =>
           (left['title'] as String).compareTo(right['title'] as String));
 
@@ -445,7 +441,8 @@ class ResourceUpdateService {
         const JsonEncoder.withIndent('  ').convert({
           'schemaVersion': 1,
           'generatedAt': generatedAt,
-          'source': 'Android APK Addressables and TextAsset chart bundles',
+          'source':
+              'Android APK GameInformation, Addressables, and TextAsset chart bundles',
           'apkVersionName': release.versionName,
           'apkVersionCode': release.versionCode,
           'songs': songs,
@@ -455,7 +452,7 @@ class ResourceUpdateService {
 
       yield ResourceUpdateEvent(
         stage: ResourceUpdateStage.complete,
-        message: '已完成 APK 下载、Addressables 目录解析和 $extracted 个谱面解压；曲绘和音频解析后续接入。',
+        message: '已完成 APK 下载、曲目信息解析和 $extracted 个谱面解压；曲绘和音频解析后续接入。',
         progress: 1,
       );
     } on Object catch (error) {
@@ -496,6 +493,27 @@ class ResourceUpdateService {
   static String? _chartLevel(String key) {
     final match = RegExp(r'/Chart_(EZ|HD|IN|AT)\.json$').firstMatch(key);
     return match?.group(1);
+  }
+
+  static Map<String, dynamic> _catalogSongJson(
+    String songId,
+    Map<String, String> chartPaths,
+    Song? info,
+  ) {
+    return {
+      'id': songId,
+      'title': info?.title ?? songId,
+      'composer': info?.composer ?? '',
+      'illustrator': info?.illustrator ?? '',
+      'charters': info?.charters ?? const <String>[],
+      'difficulties': info?.difficulties ?? const <double>[],
+      'illustrationPath': null,
+      'musicPath': null,
+      'chartPaths': {
+        for (final level in chartLevels)
+          if (chartPaths[level] case final path?) level: path,
+      },
+    };
   }
 
   ResourceUpdateEvent _eventFromLine(String line, String output) {

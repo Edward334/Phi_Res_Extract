@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:phigros_library/main.dart';
+import 'package:phigros_library/models/song.dart';
 import 'package:phigros_library/services/catalog_repository.dart';
 
 void main() {
@@ -33,5 +34,22 @@ void main() {
       catalog.songs.any((song) => song.title == '70 Minutes Fighters'),
       isTrue,
     );
+  });
+
+  test('keeps zero difficulty hidden unless a chart exists', () {
+    final song = Song(
+      id: 'example',
+      title: 'Example',
+      composer: '',
+      illustrator: '',
+      charters: const ['ez', 'hd', 'in', ''],
+      difficulties: const [1, 6.5, 12.6, 0],
+      illustrationPath: null,
+      musicPath: null,
+      chartPaths: const {'EZ': 'chart/example.0/EZ.json'},
+    );
+
+    expect(song.levels.map((level) => level.code), ['EZ', 'HD', 'IN']);
+    expect(song.levels.last.difficulty, 12.6);
   });
 }
