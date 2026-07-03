@@ -545,11 +545,13 @@ class _LevelTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final difficulty = level.difficulty;
     return ListTile(
       contentPadding: EdgeInsets.zero,
       leading: CircleAvatar(child: Text(level.code)),
-      title: Text('Lv.${level.difficulty.toStringAsFixed(1)}'),
-      subtitle: Text(level.charter),
+      title: Text(
+          difficulty == null ? 'Lv.?' : 'Lv.${difficulty.toStringAsFixed(1)}'),
+      subtitle: Text(level.charter.isEmpty ? '谱师未知' : level.charter),
       trailing: Icon(
         level.chartPath == null ? Icons.error_outline : Icons.check_circle,
       ),

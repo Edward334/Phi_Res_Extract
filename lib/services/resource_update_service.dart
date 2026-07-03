@@ -1,9 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:archive/archive_io.dart';
 import 'package:path/path.dart' as p;
 
+import '../models/song.dart';
 import 'apk_addressables_reader.dart';
+import 'unity_fs_reader.dart';
 
 enum ResourceUpdateStage {
   resolving,
@@ -110,6 +114,8 @@ class ResourceUpdateService {
   final String pythonExecutable;
   final String apkMetadataUrl;
   final _addressablesReader = const ApkAddressablesReader();
+  final _unityFsReader = const UnityFsReader();
+  final _serializedReader = const UnitySerializedFileReader();
 
   bool get canUpdate => libraryRoot.trim().isNotEmpty;
   bool get usesRemoteApkMetadata => Platform.isAndroid;
@@ -319,10 +325,138 @@ class ResourceUpdateService {
         encoding: utf8,
       );
 
+      final chartAssets = assets.where(_isChartAsset).toList();
+      if (chartAssets.isEmpty) {
+        throw const FormatException('Addressables 中没有找到谱面资源');
+      }
+
       yield ResourceUpdateEvent(
-        stage: ResourceUpdateStage.failed,
-        message:
-            '已完成 APK 下载和 Addressables 目录解析，共 ${assets.length} 个资源；Unity bundle/谱面/音频解析器尚未接入。',
+        stage: ResourceUpdateStage.extractingAssets,
+        message: '正在端内解压谱面 0 / ${chartAssets.length}',
+        progress: 0,
+      );
+
+      final chartsBySong = <String, Map<String, String>>{};
+      final assetsByBundle = <String, List<AddressableAsset>>{};
+      for (final asset in chartAssets) {
+        assetsByBundle.putIfAbsent(asset.bundle, () => []).add(asset);
+      }
+
+      var processed = 0;
+      var extracted = 0;
+      final input = InputFileStream(apk.path);
+      try {
+        final archive = ZipDecoder().decodeBuffer(input);
+        try {
+          final archiveFiles = {
+            for (final file in archive.files)
+              if (file.isFile) file.name: file,
+          };
+
+          for (final entry in assetsByBundle.entries) {
+            final bundleFile = archiveFiles['assets/aa/Android/${entry.key}'];
+            if (bundleFile != null) {
+              final bundleContent = bundleFile.content;
+              final bundleBytes = bundleContent is Uint8List
+                  ? bundleContent
+                  : Uint8List.fromList(bundleContent as List<int>);
+              final textAssets = <String, UnityTextAsset>{};
+              for (final file in _unityFsReader.readFiles(bundleBytes)) {
+                for (final text
+                    in _serializedReader.readTextAssets(file.data)) {
+                  textAssets[text.name] = text;
+                }
+              }
+
+              for (final asset in entry.value) {
+                final level = _chartLevel(asset.key);
+                final trackId = _chartTrackId(asset.key);
+                if (level == null || trackId == null) {
+                  continue;
+                }
+                final text = textAssets['Chart_$level'];
+                if (text == null) {
+                  continue;
+                }
+
+                final chartDir = Directory(p.join(root.path, 'chart', trackId));
+                await chartDir.create(recursive: true);
+                final relativePath =
+                    p.posix.join('chart', trackId, '$level.json');
+                await File(p.join(root.path, relativePath)).writeAsBytes(
+                  text.bytes,
+                  flush: false,
+                );
+                final songId = trackId.endsWith('.0')
+                    ? trackId.substring(0, trackId.length - 2)
+                    : trackId;
+                chartsBySong.putIfAbsent(
+                    songId, () => <String, String>{})[level] = relativePath;
+                extracted += 1;
+              }
+              bundleFile.clear();
+            }
+
+            processed += entry.value.length;
+            yield ResourceUpdateEvent(
+              stage: ResourceUpdateStage.extractingAssets,
+              message: '正在端内解压谱面 $processed / ${chartAssets.length}',
+              progress: processed / chartAssets.length,
+            );
+          }
+        } finally {
+          await archive.clear();
+        }
+      } finally {
+        await input.close();
+      }
+
+      if (extracted == 0) {
+        throw const FormatException('未能从 Unity bundle 中解出谱面');
+      }
+
+      yield const ResourceUpdateEvent(
+        stage: ResourceUpdateStage.writingCatalog,
+        message: '正在写入曲目目录',
+        progress: 1,
+      );
+
+      final generatedAt = DateTime.now().toUtc().toIso8601String();
+      final songs = [
+        for (final entry in chartsBySong.entries)
+          {
+            'id': entry.key,
+            'title': entry.key,
+            'composer': '',
+            'illustrator': '',
+            'charters': const <String>[],
+            'difficulties': const <double>[],
+            'illustrationPath': null,
+            'musicPath': null,
+            'chartPaths': {
+              for (final level in chartLevels)
+                if (entry.value[level] case final path?) level: path,
+            },
+          },
+      ]..sort((left, right) =>
+          (left['title'] as String).compareTo(right['title'] as String));
+
+      await File(p.join(catalogDir.path, 'songs.json')).writeAsString(
+        const JsonEncoder.withIndent('  ').convert({
+          'schemaVersion': 1,
+          'generatedAt': generatedAt,
+          'source': 'Android APK Addressables and TextAsset chart bundles',
+          'apkVersionName': release.versionName,
+          'apkVersionCode': release.versionCode,
+          'songs': songs,
+        }),
+        encoding: utf8,
+      );
+
+      yield ResourceUpdateEvent(
+        stage: ResourceUpdateStage.complete,
+        message: '已完成 APK 下载、Addressables 目录解析和 $extracted 个谱面解压；曲绘和音频解析后续接入。',
+        progress: 1,
       );
     } on Object catch (error) {
       yield ResourceUpdateEvent(
@@ -345,6 +479,23 @@ class ResourceUpdateService {
       return '${(bytes / 1024).toStringAsFixed(1)} KB';
     }
     return '$bytes B';
+  }
+
+  static bool _isChartAsset(AddressableAsset asset) {
+    return _chartLevel(asset.key) != null;
+  }
+
+  static String? _chartTrackId(String key) {
+    final index = key.indexOf('/Chart_');
+    if (index <= 0) {
+      return null;
+    }
+    return key.substring(0, index);
+  }
+
+  static String? _chartLevel(String key) {
+    final match = RegExp(r'/Chart_(EZ|HD|IN|AT)\.json$').firstMatch(key);
+    return match?.group(1);
   }
 
   ResourceUpdateEvent _eventFromLine(String line, String output) {

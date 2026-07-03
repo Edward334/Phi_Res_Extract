@@ -62,16 +62,40 @@ class Song {
   final Map<String, String> chartPaths;
 
   List<ChartLevel> get levels {
-    return [
+    final codes = <String>[
       for (var index = 0; index < difficulties.length; index += 1)
+        index < chartLevels.length ? chartLevels[index] : 'L$index',
+      for (var index = 0; index < chartLevels.length; index += 1)
+        if (chartPaths.containsKey(chartLevels[index]) &&
+            difficulties.length <= index)
+          chartLevels[index],
+    ];
+
+    return [
+      for (final code in codes)
         ChartLevel(
-          code: index < chartLevels.length ? chartLevels[index] : 'L$index',
-          difficulty: difficulties[index],
-          charter: index < charters.length ? charters[index] : '',
-          chartPath: chartPaths[
-              index < chartLevels.length ? chartLevels[index] : 'L$index'],
+          code: code,
+          difficulty: _difficultyFor(code),
+          charter: _charterFor(code),
+          chartPath: chartPaths[code],
         ),
     ];
+  }
+
+  double? _difficultyFor(String code) {
+    final index = chartLevels.indexOf(code);
+    if (index < 0 || index >= difficulties.length) {
+      return null;
+    }
+    return difficulties[index];
+  }
+
+  String _charterFor(String code) {
+    final index = chartLevels.indexOf(code);
+    if (index < 0 || index >= charters.length) {
+      return '';
+    }
+    return charters[index];
   }
 
   factory Song.fromJson(Map<String, dynamic> json) {
@@ -85,7 +109,6 @@ class Song {
           .toList(),
       difficulties: (json['difficulties'] as List<dynamic>? ?? const [])
           .map((item) => double.tryParse(item.toString()) ?? 0)
-          .where((item) => item > 0)
           .toList(),
       illustrationPath: json['illustrationPath'] as String?,
       musicPath: json['musicPath'] as String?,
@@ -105,7 +128,7 @@ class ChartLevel {
   });
 
   final String code;
-  final double difficulty;
+  final double? difficulty;
   final String charter;
   final String? chartPath;
 }
