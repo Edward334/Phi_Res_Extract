@@ -1,4 +1,4 @@
-name: Android Release
+name: Release
 
 on:
   workflow_dispatch:
@@ -83,16 +83,78 @@ jobs:
           name: phi-res-extract-android-release
           path: phi-res-extract-${{ inputs.tag }}-android-release.apk
 
+  linux-release:
+    name: Linux Release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev zip
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Build Linux release bundle
+        run: |
+          flutter build linux --release
+          (cd build/linux/x64/release/bundle && zip -r "${GITHUB_WORKSPACE}/phi-res-extract-${TAG}-linux-x64.zip" .)
+        env:
+          TAG: ${{ inputs.tag }}
+
+      - name: Upload Linux release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: phi-res-extract-linux-release
+          path: phi-res-extract-${{ inputs.tag }}-linux-x64.zip
+
+  publish-release:
+    name: Publish Release
+    runs-on: ubuntu-24.04
+    needs:
+      - android-release
+      - linux-release
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Download APK metadata JSON
+        run: |
+          curl --fail --location --show-error \
+            https://github.com/Edward334/Phi_Res_Extract/releases/download/apk-latest/taptap-apk.json \
+            --output dist/taptap-apk.json
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
           name: Phi Res Extract ${{ inputs.tag }}
           body: |
-            Android release APK for Phi Res Extract.
+            Release builds for Phi Res Extract.
 
-            This APK does not bundle TapTap, the Phigros APK, charts, illustrations, or music. The app downloads the official APK at runtime from the lightweight metadata JSON and extracts resources on device.
+            These builds do not bundle TapTap, the Phigros APK, charts, illustrations, or music. The app downloads the official APK at runtime from the lightweight metadata JSON and extracts resources on device.
+
+            Assets:
+            - Android release APK
+            - Linux x64 release bundle
+            - `taptap-apk.json`, copied from the lightweight `apk-latest` metadata release
 
             Launcher icon source: original project artwork in `assets/branding/app_icon.svg`; no third-party or commercial icon assets are used.
-          files: phi-res-extract-${{ inputs.tag }}-android-release.apk
+          files: |
+            dist/phi-res-extract-${{ inputs.tag }}-android-release.apk
+            dist/phi-res-extract-${{ inputs.tag }}-linux-x64.zip
+            dist/taptap-apk.json
           make_latest: true
+          overwrite_files: true
