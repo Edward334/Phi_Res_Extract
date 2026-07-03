@@ -169,7 +169,7 @@ class ResourceUpdateService {
     }
 
     if (usesRemoteApkMetadata) {
-      yield* _downloadApkStream();
+      yield* _downloadApkStream(catalogOnly: catalogOnly);
       return;
     }
 
@@ -244,7 +244,9 @@ class ResourceUpdateService {
     }
   }
 
-  Stream<ResourceUpdateEvent> _downloadApkStream() async* {
+  Stream<ResourceUpdateEvent> _downloadApkStream({
+    required bool catalogOnly,
+  }) async* {
     final root = Directory(libraryRoot);
     final apkDir = Directory(p.join(root.path, 'apk'));
     await apkDir.create(recursive: true);
@@ -253,304 +255,388 @@ class ResourceUpdateService {
     final part = File('${apk.path}.part');
     final metadataFile = File(p.join(apkDir.path, 'taptap-apk.json'));
 
-    yield const ResourceUpdateEvent(
-      stage: ResourceUpdateStage.resolving,
-      message: '正在获取 APK 下载地址',
-    );
-
-    final client = HttpClient();
     try {
-      final release = await _resolveLatestFromMetadata();
-      await metadataFile.writeAsString(
-        jsonEncode({
-          'url': release.url,
-          'versionName': release.versionName,
-          'versionCode': release.versionCode,
-          'updateDate': release.updateDate,
-          'size': release.size,
-        }),
-        encoding: utf8,
-      );
-
-      if (release.url.isEmpty) {
-        throw const FormatException('APK 下载地址为空');
-      }
-
-      final uri = Uri.parse(release.url);
-      final request = await client.getUrl(uri);
-      final response = await request.close();
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw HttpException(
-          'APK 下载失败：HTTP ${response.statusCode}',
-          uri: uri,
+      if (catalogOnly) {
+        if (!await apk.exists()) {
+          throw const FormatException('本地 APK 不存在，请先下载并解包。');
+        }
+        yield const ResourceUpdateEvent(
+          stage: ResourceUpdateStage.extractingMetadata,
+          message: '正在使用本地 APK 重建目录',
+          progress: 1,
         );
-      }
-
-      final total = release.size > 0 ? release.size : response.contentLength;
-      var downloaded = 0;
-      final sink = part.openWrite();
-      await for (final chunk in response) {
-        downloaded += chunk.length;
-        sink.add(chunk);
-        yield ResourceUpdateEvent(
-          stage: ResourceUpdateStage.downloading,
-          message: total > 0
-              ? '正在下载 APK ${_formatBytes(downloaded)} / ${_formatBytes(total)}'
-              : '正在下载 APK ${_formatBytes(downloaded)}',
-          progress: total > 0 ? downloaded / total : null,
+        final release = await _cachedApkRelease(metadataFile, apk);
+        yield* _extractApkStream(
+          root: root,
+          apk: apk,
+          release: release,
+          downloadedApk: false,
         );
+        return;
       }
-      await sink.close();
-      if (await apk.exists()) {
-        await apk.delete();
-      }
-      await part.rename(apk.path);
 
       yield const ResourceUpdateEvent(
-        stage: ResourceUpdateStage.extractingMetadata,
-        message: '正在端内解析 Addressables 目录',
-        progress: 1,
+        stage: ResourceUpdateStage.resolving,
+        message: '正在获取 APK 下载地址',
       );
 
-      final assets = await _addressablesReader.readTrackAssets(apk);
-      final catalogDir = Directory(p.join(root.path, 'catalog'));
-      await catalogDir.create(recursive: true);
-      await File(p.join(catalogDir.path, 'addressables.json')).writeAsString(
-        jsonEncode({
-          'generatedAt': DateTime.now().toUtc().toIso8601String(),
-          'apk': {
+      late final ApkRelease release;
+      var downloadedApk = true;
+      final client = HttpClient();
+      try {
+        release = await _resolveLatestFromMetadata();
+        final reuseCachedApk =
+            await _canReuseCachedApk(metadataFile, apk, release);
+        await metadataFile.writeAsString(
+          jsonEncode({
+            'url': release.url,
             'versionName': release.versionName,
             'versionCode': release.versionCode,
+            'updateDate': release.updateDate,
             'size': release.size,
-          },
-          'assets': assets.map((asset) => asset.toJson()).toList(),
-        }),
-        encoding: utf8,
-      );
+          }),
+          encoding: utf8,
+        );
 
-      yield const ResourceUpdateEvent(
-        stage: ResourceUpdateStage.extractingMetadata,
-        message: '正在端内解析曲目信息',
-        progress: 1,
-      );
-      final songInfo = await _gameInformationReader.readSongs(apk);
+        if (release.url.isEmpty) {
+          throw const FormatException('APK 下载地址为空');
+        }
 
-      final chartAssets = assets.where(_isChartAsset).toList();
-      if (chartAssets.isEmpty) {
-        throw const FormatException('Addressables 中没有找到谱面资源');
-      }
-      final illustrationAssets = _selectIllustrationAssets(assets);
-      final musicAssets = assets.where(_isMusicAsset).toList();
-      final totalAssets =
-          chartAssets.length + illustrationAssets.length + musicAssets.length;
-
-      yield ResourceUpdateEvent(
-        stage: ResourceUpdateStage.extractingAssets,
-        message: '正在端内解压谱面、曲绘和音频 0 / $totalAssets',
-        progress: 0,
-      );
-
-      final chartsBySong = <String, Map<String, String>>{};
-      final illustrationsBySong = <String, String>{};
-      final musicBySong = <String, String>{};
-      final assetsByBundle = <String, List<AddressableAsset>>{};
-      for (final asset in [
-        ...chartAssets,
-        ...illustrationAssets,
-        ...musicAssets
-      ]) {
-        assetsByBundle.putIfAbsent(asset.bundle, () => []).add(asset);
-      }
-
-      var processed = 0;
-      var extracted = 0;
-      var illustrations = 0;
-      var music = 0;
-      final input = InputFileStream(apk.path);
-      try {
-        final archive = ZipDecoder().decodeBuffer(input);
-        try {
-          final archiveFiles = {
-            for (final file in archive.files)
-              if (file.isFile) file.name: file,
-          };
-
-          for (final entry in assetsByBundle.entries) {
-            final bundleFile = archiveFiles['assets/aa/Android/${entry.key}'];
-            if (bundleFile != null) {
-              final bundleContent = bundleFile.content;
-              final bundleBytes = bundleContent is Uint8List
-                  ? bundleContent
-                  : Uint8List.fromList(bundleContent as List<int>);
-              final unityFiles = _unityFsReader.readFiles(bundleBytes);
-              final resources = {
-                for (final file in unityFiles)
-                  if (file.path.endsWith('.resS') ||
-                      file.path.endsWith('.resource'))
-                    file.path.split('/').last: file.data,
-              };
-              final textAssets = <String, UnityTextAsset>{};
-              final textures = <String, UnityTexture2D>{};
-              final audioClips = <String, UnityAudioClip>{};
-              for (final file in unityFiles) {
-                if (file.path.endsWith('.resS') ||
-                    file.path.endsWith('.resource')) {
-                  continue;
-                }
-                for (final text
-                    in _serializedReader.readTextAssets(file.data)) {
-                  textAssets[text.name] = text;
-                }
-                for (final texture in _serializedReader.readTexture2Ds(
-                  file.data,
-                  resources: resources,
-                )) {
-                  textures[texture.name] = texture;
-                }
-                for (final clip in _serializedReader.readAudioClips(
-                  file.data,
-                  resources: resources,
-                )) {
-                  audioClips[clip.name] = clip;
-                }
-              }
-
-              for (final asset in entry.value) {
-                final level = _chartLevel(asset.key);
-                final trackId = _chartTrackId(asset.key);
-                if (level != null && trackId != null) {
-                  final text = textAssets['Chart_$level'];
-                  if (text == null) {
-                    continue;
-                  }
-
-                  final chartDir =
-                      Directory(p.join(root.path, 'chart', trackId));
-                  await chartDir.create(recursive: true);
-                  final relativePath =
-                      p.posix.join('chart', trackId, '$level.json');
-                  await File(p.join(root.path, relativePath)).writeAsBytes(
-                    text.bytes,
-                    flush: false,
-                  );
-                  final songId = _songIdFromTrackId(trackId);
-                  chartsBySong.putIfAbsent(
-                      songId, () => <String, String>{})[level] = relativePath;
-                  extracted += 1;
-                  continue;
-                }
-
-                final musicTrackId = _musicTrackId(asset.key);
-                if (musicTrackId != null) {
-                  final clip = audioClips['music'] ??
-                      (audioClips.isEmpty ? null : audioClips.values.first);
-                  if (clip == null) {
-                    continue;
-                  }
-
-                  final songId = _songIdFromTrackId(musicTrackId);
-                  final musicDir = Directory(p.join(root.path, 'music'));
-                  await musicDir.create(recursive: true);
-                  final relativePath =
-                      p.posix.join('music', '$songId${clip.extension}');
-                  await File(p.join(root.path, relativePath)).writeAsBytes(
-                    clip.bytes,
-                    flush: false,
-                  );
-                  musicBySong[songId] = relativePath;
-                  music += 1;
-                  continue;
-                }
-
-                final illustrationTrackId = _illustrationTrackId(asset.key);
-                final illustrationName = _illustrationName(asset.key);
-                if (illustrationTrackId == null || illustrationName == null) {
-                  continue;
-                }
-                final texture = textures[illustrationName];
-                if (texture == null || !texture.isRgb24) {
-                  continue;
-                }
-
-                final songId = _songIdFromTrackId(illustrationTrackId);
-                final imageDir = Directory(p.join(root.path, 'illustration'));
-                await imageDir.create(recursive: true);
-                final relativePath =
-                    p.posix.join('illustration', '$songId.png');
-                await File(p.join(root.path, relativePath)).writeAsBytes(
-                  _pngEncoder.encode(texture),
-                  flush: false,
-                );
-                illustrationsBySong[songId] = relativePath;
-                illustrations += 1;
-              }
-              bundleFile.clear();
-            }
-
-            processed += entry.value.length;
-            yield ResourceUpdateEvent(
-              stage: ResourceUpdateStage.extractingAssets,
-              message: '正在端内解压谱面、曲绘和音频 $processed / $totalAssets',
-              progress: processed / totalAssets,
+        if (reuseCachedApk) {
+          yield const ResourceUpdateEvent(
+            stage: ResourceUpdateStage.downloading,
+            message: '本地 APK 已是最新，跳过下载',
+            progress: 1,
+          );
+          downloadedApk = false;
+        } else {
+          final uri = Uri.parse(release.url);
+          final request = await client.getUrl(uri);
+          final response = await request.close();
+          if (response.statusCode < 200 || response.statusCode >= 300) {
+            throw HttpException(
+              'APK 下载失败：HTTP ${response.statusCode}',
+              uri: uri,
             );
           }
-        } finally {
-          await archive.clear();
+
+          final total =
+              release.size > 0 ? release.size : response.contentLength;
+          var downloaded = 0;
+          final sink = part.openWrite();
+          await for (final chunk in response) {
+            downloaded += chunk.length;
+            sink.add(chunk);
+            yield ResourceUpdateEvent(
+              stage: ResourceUpdateStage.downloading,
+              message: total > 0
+                  ? '正在下载 APK ${_formatBytes(downloaded)} / ${_formatBytes(total)}'
+                  : '正在下载 APK ${_formatBytes(downloaded)}',
+              progress: total > 0 ? downloaded / total : null,
+            );
+          }
+          await sink.close();
+          if (await apk.exists()) {
+            await apk.delete();
+          }
+          await part.rename(apk.path);
         }
       } finally {
-        await input.close();
+        client.close(force: true);
       }
 
-      if (extracted == 0) {
-        throw const FormatException('未能从 Unity bundle 中解出谱面');
-      }
-
-      yield const ResourceUpdateEvent(
-        stage: ResourceUpdateStage.writingCatalog,
-        message: '正在写入曲目目录',
-        progress: 1,
-      );
-
-      final generatedAt = DateTime.now().toUtc().toIso8601String();
-      final songs = [
-        for (final entry in chartsBySong.entries)
-          _catalogSongJson(
-            entry.key,
-            entry.value,
-            songInfo[entry.key],
-            illustrationsBySong[entry.key],
-            musicBySong[entry.key],
-          ),
-      ]..sort((left, right) =>
-          (left['title'] as String).compareTo(right['title'] as String));
-
-      await File(p.join(catalogDir.path, 'songs.json')).writeAsString(
-        const JsonEncoder.withIndent('  ').convert({
-          'schemaVersion': 1,
-          'generatedAt': generatedAt,
-          'source':
-              'Android APK GameInformation, Addressables, TextAsset charts, RGB24 Texture2D illustrations, and AudioClip music',
-          'apkVersionName': release.versionName,
-          'apkVersionCode': release.versionCode,
-          'songs': songs,
-        }),
-        encoding: utf8,
-      );
-
-      yield ResourceUpdateEvent(
-        stage: ResourceUpdateStage.complete,
-        message:
-            '已完成 APK 下载、曲目信息解析、$extracted 个谱面、$illustrations 张曲绘和 $music 首音频解压。',
-        progress: 1,
+      yield* _extractApkStream(
+        root: root,
+        apk: apk,
+        release: release,
+        downloadedApk: downloadedApk,
       );
     } on Object catch (error) {
       yield ResourceUpdateEvent(
         stage: ResourceUpdateStage.failed,
         message: error.toString(),
       );
-    } finally {
-      client.close(force: true);
     }
+  }
+
+  Future<bool> _canReuseCachedApk(
+    File metadataFile,
+    File apk,
+    ApkRelease latest,
+  ) async {
+    if (!await apk.exists() || !await metadataFile.exists()) {
+      return false;
+    }
+    if (latest.versionCode <= 0 || latest.size <= 0) {
+      return false;
+    }
+    final cached = await _cachedApkRelease(metadataFile, apk);
+    return cached.versionCode == latest.versionCode &&
+        cached.size == latest.size &&
+        await apk.length() == latest.size;
+  }
+
+  Future<ApkRelease> _cachedApkRelease(File metadataFile, File apk) async {
+    if (await metadataFile.exists()) {
+      try {
+        return ApkRelease.fromUpdaterJson(
+          jsonDecode(await metadataFile.readAsString()) as Map<String, dynamic>,
+        );
+      } on Object {
+        // Fall through to a local-only release record.
+      }
+    }
+    return ApkRelease(
+      versionName: '本地 APK',
+      versionCode: 0,
+      updateDate: '',
+      size: await apk.length(),
+      url: '',
+    );
+  }
+
+  Stream<ResourceUpdateEvent> _extractApkStream({
+    required Directory root,
+    required File apk,
+    required ApkRelease release,
+    required bool downloadedApk,
+  }) async* {
+    yield const ResourceUpdateEvent(
+      stage: ResourceUpdateStage.extractingMetadata,
+      message: '正在端内解析 Addressables 目录',
+      progress: 1,
+    );
+
+    final assets = await _addressablesReader.readTrackAssets(apk);
+    final catalogDir = Directory(p.join(root.path, 'catalog'));
+    await catalogDir.create(recursive: true);
+    await File(p.join(catalogDir.path, 'addressables.json')).writeAsString(
+      jsonEncode({
+        'generatedAt': DateTime.now().toUtc().toIso8601String(),
+        'apk': {
+          'versionName': release.versionName,
+          'versionCode': release.versionCode,
+          'size': release.size,
+        },
+        'assets': assets.map((asset) => asset.toJson()).toList(),
+      }),
+      encoding: utf8,
+    );
+
+    yield const ResourceUpdateEvent(
+      stage: ResourceUpdateStage.extractingMetadata,
+      message: '正在端内解析曲目信息',
+      progress: 1,
+    );
+    final songInfo = await _gameInformationReader.readSongs(apk);
+
+    final chartAssets = assets.where(_isChartAsset).toList();
+    if (chartAssets.isEmpty) {
+      throw const FormatException('Addressables 中没有找到谱面资源');
+    }
+    final illustrationAssets = _selectIllustrationAssets(assets);
+    final musicAssets = assets.where(_isMusicAsset).toList();
+    final totalAssets =
+        chartAssets.length + illustrationAssets.length + musicAssets.length;
+
+    yield ResourceUpdateEvent(
+      stage: ResourceUpdateStage.extractingAssets,
+      message: '正在端内解压谱面、曲绘和音频 0 / $totalAssets',
+      progress: 0,
+    );
+
+    final chartsBySong = <String, Map<String, String>>{};
+    final illustrationsBySong = <String, String>{};
+    final musicBySong = <String, String>{};
+    final assetsByBundle = <String, List<AddressableAsset>>{};
+    for (final asset in [
+      ...chartAssets,
+      ...illustrationAssets,
+      ...musicAssets
+    ]) {
+      assetsByBundle.putIfAbsent(asset.bundle, () => []).add(asset);
+    }
+
+    var processed = 0;
+    var extracted = 0;
+    var illustrations = 0;
+    var music = 0;
+    final input = InputFileStream(apk.path);
+    try {
+      final archive = ZipDecoder().decodeBuffer(input);
+      try {
+        final archiveFiles = {
+          for (final file in archive.files)
+            if (file.isFile) file.name: file,
+        };
+
+        for (final entry in assetsByBundle.entries) {
+          final bundleFile = archiveFiles['assets/aa/Android/${entry.key}'];
+          if (bundleFile != null) {
+            final bundleContent = bundleFile.content;
+            final bundleBytes = bundleContent is Uint8List
+                ? bundleContent
+                : Uint8List.fromList(bundleContent as List<int>);
+            final unityFiles = _unityFsReader.readFiles(bundleBytes);
+            final resources = {
+              for (final file in unityFiles)
+                if (file.path.endsWith('.resS') ||
+                    file.path.endsWith('.resource'))
+                  file.path.split('/').last: file.data,
+            };
+            final textAssets = <String, UnityTextAsset>{};
+            final textures = <String, UnityTexture2D>{};
+            final audioClips = <String, UnityAudioClip>{};
+            for (final file in unityFiles) {
+              if (file.path.endsWith('.resS') ||
+                  file.path.endsWith('.resource')) {
+                continue;
+              }
+              for (final text in _serializedReader.readTextAssets(file.data)) {
+                textAssets[text.name] = text;
+              }
+              for (final texture in _serializedReader.readTexture2Ds(
+                file.data,
+                resources: resources,
+              )) {
+                textures[texture.name] = texture;
+              }
+              for (final clip in _serializedReader.readAudioClips(
+                file.data,
+                resources: resources,
+              )) {
+                audioClips[clip.name] = clip;
+              }
+            }
+
+            for (final asset in entry.value) {
+              final level = _chartLevel(asset.key);
+              final trackId = _chartTrackId(asset.key);
+              if (level != null && trackId != null) {
+                final text = textAssets['Chart_$level'];
+                if (text == null) {
+                  continue;
+                }
+
+                final chartDir = Directory(p.join(root.path, 'chart', trackId));
+                await chartDir.create(recursive: true);
+                final relativePath =
+                    p.posix.join('chart', trackId, '$level.json');
+                await File(p.join(root.path, relativePath)).writeAsBytes(
+                  text.bytes,
+                  flush: false,
+                );
+                final songId = _songIdFromTrackId(trackId);
+                chartsBySong.putIfAbsent(
+                    songId, () => <String, String>{})[level] = relativePath;
+                extracted += 1;
+                continue;
+              }
+
+              final musicTrackId = _musicTrackId(asset.key);
+              if (musicTrackId != null) {
+                final clip = audioClips['music'] ??
+                    (audioClips.isEmpty ? null : audioClips.values.first);
+                if (clip == null) {
+                  continue;
+                }
+
+                final songId = _songIdFromTrackId(musicTrackId);
+                final musicDir = Directory(p.join(root.path, 'music'));
+                await musicDir.create(recursive: true);
+                final relativePath =
+                    p.posix.join('music', '$songId${clip.extension}');
+                await File(p.join(root.path, relativePath)).writeAsBytes(
+                  clip.bytes,
+                  flush: false,
+                );
+                musicBySong[songId] = relativePath;
+                music += 1;
+                continue;
+              }
+
+              final illustrationTrackId = _illustrationTrackId(asset.key);
+              final illustrationName = _illustrationName(asset.key);
+              if (illustrationTrackId == null || illustrationName == null) {
+                continue;
+              }
+              final texture = textures[illustrationName];
+              if (texture == null || !texture.isRgb24) {
+                continue;
+              }
+
+              final songId = _songIdFromTrackId(illustrationTrackId);
+              final imageDir = Directory(p.join(root.path, 'illustration'));
+              await imageDir.create(recursive: true);
+              final relativePath = p.posix.join('illustration', '$songId.png');
+              await File(p.join(root.path, relativePath)).writeAsBytes(
+                _pngEncoder.encode(texture),
+                flush: false,
+              );
+              illustrationsBySong[songId] = relativePath;
+              illustrations += 1;
+            }
+            bundleFile.clear();
+          }
+
+          processed += entry.value.length;
+          yield ResourceUpdateEvent(
+            stage: ResourceUpdateStage.extractingAssets,
+            message: '正在端内解压谱面、曲绘和音频 $processed / $totalAssets',
+            progress: processed / totalAssets,
+          );
+        }
+      } finally {
+        await archive.clear();
+      }
+    } finally {
+      await input.close();
+    }
+
+    if (extracted == 0) {
+      throw const FormatException('未能从 Unity bundle 中解出谱面');
+    }
+
+    yield const ResourceUpdateEvent(
+      stage: ResourceUpdateStage.writingCatalog,
+      message: '正在写入曲目目录',
+      progress: 1,
+    );
+
+    final generatedAt = DateTime.now().toUtc().toIso8601String();
+    final songs = [
+      for (final entry in chartsBySong.entries)
+        _catalogSongJson(
+          entry.key,
+          entry.value,
+          songInfo[entry.key],
+          illustrationsBySong[entry.key],
+          musicBySong[entry.key],
+        ),
+    ]..sort(
+        (left, right) =>
+            (left['title'] as String).compareTo(right['title'] as String),
+      );
+
+    await File(p.join(catalogDir.path, 'songs.json')).writeAsString(
+      const JsonEncoder.withIndent('  ').convert({
+        'schemaVersion': 1,
+        'generatedAt': generatedAt,
+        'source':
+            'Android APK GameInformation, Addressables, TextAsset charts, RGB24 Texture2D illustrations, and AudioClip music',
+        'apkVersionName': release.versionName,
+        'apkVersionCode': release.versionCode,
+        'songs': songs,
+      }),
+      encoding: utf8,
+    );
+
+    final prefix = downloadedApk ? '已完成 APK 下载、' : '已使用本地 APK 完成';
+    yield ResourceUpdateEvent(
+      stage: ResourceUpdateStage.complete,
+      message: '$prefix曲目信息解析、$extracted 个谱面、$illustrations 张曲绘和 $music 首音频解压。',
+      progress: 1,
+    );
   }
 
   static String _formatBytes(int bytes) {

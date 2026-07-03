@@ -628,17 +628,16 @@ class _UpdateSheet extends StatelessWidget {
               spacing: 10,
               runSpacing: 10,
               children: [
-                if (!usesRemoteApkMetadata)
-                  FilledButton.icon(
-                    onPressed:
-                        canUpdate && !updating ? onCatalogOnlyUpdate : null,
-                    icon: const Icon(Icons.library_music),
-                    label: const Text('仅更新目录'),
-                  ),
+                FilledButton.icon(
+                  onPressed:
+                      canUpdate && !updating ? onCatalogOnlyUpdate : null,
+                  icon: const Icon(Icons.library_music),
+                  label: Text(usesRemoteApkMetadata ? '重建目录' : '仅更新目录'),
+                ),
                 FilledButton.icon(
                   onPressed: canUpdate && !updating ? onFullUpdate : null,
                   icon: const Icon(Icons.download),
-                  label: Text(usesRemoteApkMetadata ? '下载 APK' : '下载并解包'),
+                  label: const Text('下载并解包'),
                 ),
               ],
             ),
@@ -758,7 +757,7 @@ class _EmptyState extends StatelessWidget {
             FilledButton.icon(
               onPressed: onUpdate,
               icon: const Icon(Icons.download),
-              label: const Text('下载 APK'),
+              label: const Text('下载并解包'),
             ),
           ],
         ),
