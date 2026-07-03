@@ -3,11 +3,13 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:archive/archive_io.dart';
+import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/song.dart';
 import 'apk_addressables_reader.dart';
 import 'game_information_reader.dart';
+import 'taptap_apk_resolver.dart';
 import 'unity_fs_reader.dart';
 
 enum ResourceUpdateStage {
@@ -41,6 +43,7 @@ class ApkRelease {
     required this.updateDate,
     required this.size,
     required this.url,
+    this.md5 = '',
   });
 
   final String versionName;
@@ -48,6 +51,7 @@ class ApkRelease {
   final String updateDate;
   final int size;
   final String url;
+  final String md5;
 
   String get sizeLabel {
     if (size <= 0) {
@@ -64,6 +68,7 @@ class ApkRelease {
         updateDate: json['updateDate'] as String? ?? '',
         size: (json['size'] as num?)?.toInt() ?? 0,
         url: json['url'] as String? ?? '',
+        md5: json['md5'] as String? ?? '',
       );
     }
 
@@ -79,6 +84,7 @@ class ApkRelease {
       updateDate: app['update_date'] as String? ?? '',
       size: (apk['size'] as num?)?.toInt() ?? 0,
       url: json['url'] as String? ?? apk['download'] as String? ?? '',
+      md5: apk['md5'] as String? ?? '',
     );
   }
 }
@@ -119,13 +125,14 @@ class ResourceUpdateService {
   final _unityFsReader = const UnityFsReader();
   final _serializedReader = const UnitySerializedFileReader();
   final _pngEncoder = const PngRgb24Encoder();
+  final _tapTapResolver = const TapTapApkResolver();
 
   bool get canUpdate => libraryRoot.trim().isNotEmpty;
-  bool get usesRemoteApkMetadata => Platform.isAndroid;
+  bool get usesAppSideApkPipeline => Platform.isAndroid || Platform.isLinux;
 
   Future<ApkRelease> resolveLatest() async {
-    if (usesRemoteApkMetadata) {
-      return _resolveLatestFromMetadata();
+    if (usesAppSideApkPipeline) {
+      return _resolveLatestFromTapTap();
     }
 
     final result = await Process.run(
@@ -168,7 +175,7 @@ class ResourceUpdateService {
       throw StateError('PHIGROS_LIBRARY is required before updating.');
     }
 
-    if (usesRemoteApkMetadata) {
+    if (usesAppSideApkPipeline) {
       yield* _downloadApkStream(catalogOnly: catalogOnly);
       return;
     }
@@ -244,6 +251,18 @@ class ResourceUpdateService {
     }
   }
 
+  Future<ApkRelease> _resolveLatestFromTapTap() async {
+    final latest = await _tapTapResolver.resolveLatest();
+    return ApkRelease(
+      versionName: latest.versionName,
+      versionCode: latest.versionCode,
+      updateDate: latest.updateDate,
+      size: latest.size,
+      url: latest.url,
+      md5: latest.md5,
+    );
+  }
+
   Stream<ResourceUpdateEvent> _downloadApkStream({
     required bool catalogOnly,
   }) async* {
@@ -284,7 +303,9 @@ class ResourceUpdateService {
       var downloadedApk = true;
       final client = HttpClient();
       try {
-        release = await _resolveLatestFromMetadata();
+        release = usesAppSideApkPipeline
+            ? await _resolveLatestFromTapTap()
+            : await _resolveLatestFromMetadata();
         final reuseCachedApk =
             await _canReuseCachedApk(metadataFile, apk, release);
         await metadataFile.writeAsString(
@@ -294,6 +315,7 @@ class ResourceUpdateService {
             'versionCode': release.versionCode,
             'updateDate': release.updateDate,
             'size': release.size,
+            'md5': release.md5,
           }),
           encoding: utf8,
         );
@@ -312,6 +334,7 @@ class ResourceUpdateService {
         } else {
           final uri = Uri.parse(release.url);
           final request = await client.getUrl(uri);
+          request.headers.set(HttpHeaders.userAgentHeader, 'okhttp/3.12.1');
           final response = await request.close();
           if (response.statusCode < 200 || response.statusCode >= 300) {
             throw HttpException(
@@ -336,6 +359,15 @@ class ResourceUpdateService {
             );
           }
           await sink.close();
+          if (release.size > 0 && await part.length() != release.size) {
+            throw FormatException(
+              'APK 大小校验失败：期望 ${release.size}，实际 ${await part.length()}',
+            );
+          }
+          if (release.md5.isNotEmpty &&
+              !await _fileMd5Matches(part, release.md5)) {
+            throw const FormatException('APK MD5 校验失败');
+          }
           if (await apk.exists()) {
             await apk.delete();
           }
@@ -393,6 +425,11 @@ class ResourceUpdateService {
       size: await apk.length(),
       url: '',
     );
+  }
+
+  Future<bool> _fileMd5Matches(File file, String expected) async {
+    final digest = await md5.bind(file.openRead()).first;
+    return digest.toString().toLowerCase() == expected.toLowerCase();
   }
 
   Stream<ResourceUpdateEvent> _extractApkStream({

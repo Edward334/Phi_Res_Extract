@@ -27,16 +27,19 @@ used.
 ## Android usage
 
 Install the APK from the latest versioned GitHub Release. The Android package
-does not bundle TapTap, the Phigros APK, or extracted resources. The `APK
-Metadata` workflow only resolves the latest official APK download address and
-publishes a small `taptap-apk.json` file under the `apk-latest` release. The
-JSON contains only the URL, version, size, MD5, and update date.
+does not bundle TapTap, the Phigros APK, or extracted resources. The app
+resolves the current official APK download address at runtime, downloads the APK
+into its private data directory, then extracts resources on device.
 
-On Android, tap `下载并解包`. The app fetches that JSON, downloads the APK at
-runtime into its private data directory, shows download progress, then extracts
-GameInformation, Addressables, chart TextAssets, RGB24 illustrations, and
-AudioClip music on device. APK resource extraction is intentionally an app-side
-responsibility, not a GitHub Actions resource-build step.
+On Android, tap `下载并解包`. The app resolves a fresh APK URL, downloads the APK
+at runtime into its private data directory, shows download progress, then
+extracts GameInformation, Addressables, chart TextAssets, RGB24 illustrations,
+and AudioClip music on device. APK resource extraction is intentionally an
+app-side responsibility, not a GitHub Actions resource-build step.
+
+The `APK Metadata` workflow is retained only as a lightweight release metadata
+record. It publishes `taptap-apk.json` with URL, version, size, MD5, and update
+date; it does not download or unpack the game APK.
 
 After one successful Android download, `重建目录` reuses the cached
 `apk/phigros_latest.apk` and rebuilds the local catalog without downloading the
@@ -51,6 +54,10 @@ flutter analyze
 flutter test
 flutter build linux --debug --dart-define=PHIGROS_LIBRARY=.phigros_library
 ```
+
+Linux release builds use the same app-side download and Dart extraction path as
+Android, so end users do not need Python, UnityPy, Pillow, or fsb5 to sync
+resources from the app.
 
 ## Workflow
 

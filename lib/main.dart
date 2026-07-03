@@ -258,18 +258,14 @@ class _LibraryHomeState extends State<LibraryHome> {
     setState(() => _updating = true);
     ApkRelease? release;
     Object? error;
-    if (!updater.usesRemoteApkMetadata) {
-      try {
-        release = await updater.resolveLatest();
-      } on Object catch (caught) {
-        error = caught;
-      } finally {
-        if (mounted) {
-          setState(() => _updating = false);
-        }
+    try {
+      release = await updater.resolveLatest();
+    } on Object catch (caught) {
+      error = caught;
+    } finally {
+      if (mounted) {
+        setState(() => _updating = false);
       }
-    } else if (mounted) {
-      setState(() => _updating = false);
     }
 
     if (mounted) {
@@ -283,7 +279,7 @@ class _LibraryHomeState extends State<LibraryHome> {
             error: error,
             canUpdate: updater.canUpdate,
             updating: _updating,
-            usesRemoteApkMetadata: updater.usesRemoteApkMetadata,
+            usesAppSideApkPipeline: updater.usesAppSideApkPipeline,
             onCatalogOnlyUpdate: () => _runUpdate(catalogOnly: true),
             onFullUpdate: () => _runUpdate(catalogOnly: false),
           );
@@ -566,7 +562,7 @@ class _UpdateSheet extends StatelessWidget {
     required this.error,
     required this.canUpdate,
     required this.updating,
-    required this.usesRemoteApkMetadata,
+    required this.usesAppSideApkPipeline,
     required this.onCatalogOnlyUpdate,
     required this.onFullUpdate,
   });
@@ -576,7 +572,7 @@ class _UpdateSheet extends StatelessWidget {
   final Object? error;
   final bool canUpdate;
   final bool updating;
-  final bool usesRemoteApkMetadata;
+  final bool usesAppSideApkPipeline;
   final VoidCallback onCatalogOnlyUpdate;
   final VoidCallback onFullUpdate;
 
@@ -606,11 +602,16 @@ class _UpdateSheet extends StatelessWidget {
                   : '${catalog?.songs.length ?? 0} 首，$localVersion，${generatedAt.toLocal()}',
             ),
             const SizedBox(height: 12),
-            if (usesRemoteApkMetadata)
-              const _InfoChip(
-                label: 'APK 下载地址',
+            if (usesAppSideApkPipeline && release != null)
+              _InfoChip(
+                label: '最新 APK',
                 value:
-                    '由 GitHub Actions 只解析最新 APK 地址；应用运行时下载 APK，TapTap 和资源不会打包进应用。',
+                    '${release!.versionName} (${release!.versionCode}), ${release!.sizeLabel}',
+              )
+            else if (usesAppSideApkPipeline)
+              const _InfoChip(
+                label: '最新 APK',
+                value: '检查失败。应用会在下载时重新解析一次官方 APK 地址。',
               )
             else if (release != null)
               _InfoChip(
@@ -632,7 +633,7 @@ class _UpdateSheet extends StatelessWidget {
                   onPressed:
                       canUpdate && !updating ? onCatalogOnlyUpdate : null,
                   icon: const Icon(Icons.library_music),
-                  label: Text(usesRemoteApkMetadata ? '重建目录' : '仅更新目录'),
+                  label: Text(usesAppSideApkPipeline ? '重建目录' : '仅更新目录'),
                 ),
                 FilledButton.icon(
                   onPressed: canUpdate && !updating ? onFullUpdate : null,
@@ -749,7 +750,7 @@ class _EmptyState extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              '点击下载 APK 后，应用会从轻量下载地址 JSON 获取官方 APK 地址；TapTap、APK 和资源都不会预打包进应用。',
+              '点击下载 APK 后，应用会实时解析官方 APK 地址并在本机解包；TapTap、APK 和资源都不会预打包进应用。',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyMedium,
             ),
