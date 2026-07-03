@@ -18,10 +18,16 @@ package does not bundle TapTap, the Phigros APK, or extracted resources. The
 and publishes a small `taptap-apk.json` file under the `apk-latest` release.
 The JSON contains only the URL, version, size, MD5, and update date.
 
-On Android, tap `下载 APK`. The app fetches that JSON, downloads the APK at
-runtime into its private data directory, and shows download progress. APK
-resource extraction is intentionally an app-side responsibility, not a GitHub
-Actions resource-build step.
+On Android, tap `下载并解包`. The app fetches that JSON, downloads the APK at
+runtime into its private data directory, shows download progress, then extracts
+GameInformation, Addressables, chart TextAssets, RGB24 illustrations, and
+AudioClip music on device. APK resource extraction is intentionally an app-side
+responsibility, not a GitHub Actions resource-build step.
+
+After one successful Android download, `重建目录` reuses the cached
+`apk/phigros_latest.apk` and rebuilds the local catalog without downloading the
+APK again. A normal `下载并解包` also skips the APK download when the cached APK
+metadata and file size already match the latest metadata JSON.
 
 Local Linux build:
 
