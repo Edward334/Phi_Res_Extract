@@ -13,10 +13,12 @@ and manual dispatch:
 Versioned releases are built by the `Release` workflow and published under
 GitHub Releases, for example `v0.1.0`. Each versioned release contains the
 Android release APK, the Linux x64 release bundle, and a copy of
-`taptap-apk.json` from the lightweight `apk-latest` metadata release. Android
-release signing uses repository secrets (`ANDROID_KEYSTORE_BASE64`,
-`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`);
-the private keystore is not committed to the repository.
+`taptap-apk.json` from the lightweight `apk-latest` metadata release. The Linux
+bundle includes the `tools/` updater scripts at its root for desktop sync
+actions. Android release signing uses repository secrets
+(`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`,
+and `ANDROID_KEY_PASSWORD`); the private keystore is not committed to the
+repository.
 
 The Android launcher icon is original project artwork. Source:
 `assets/branding/app_icon.svg`. No third-party or commercial icon assets are

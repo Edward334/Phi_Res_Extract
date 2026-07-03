@@ -107,6 +107,8 @@ jobs:
       - name: Build Linux release bundle
         run: |
           flutter build linux --release
+          mkdir -p build/linux/x64/release/bundle/tools
+          cp tools/*.py tools/typetree.json build/linux/x64/release/bundle/tools/
           (cd build/linux/x64/release/bundle && zip -r "${GITHUB_WORKSPACE}/phi-res-extract-${TAG}-linux-x64.zip" .)
         env:
           TAG: ${{ inputs.tag }}

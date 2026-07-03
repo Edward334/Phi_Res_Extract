@@ -1,4 +1,4 @@
-package com.example.phigros_library
+package io.github.edward334.phigroslibrary
 
 import io.flutter.embedding.android.FlutterActivity
 
