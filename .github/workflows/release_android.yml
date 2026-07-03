@@ -1,0 +1,98 @@
+name: Android Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v0.1.0.
+        required: true
+        default: v0.1.0
+      build_number:
+        description: Android versionCode.
+        required: true
+        default: "1"
+
+permissions:
+  contents: write
+
+jobs:
+  android-release:
+    name: Android Release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/gradle/wrapper/gradle-wrapper.properties', 'android/**/*.gradle*', 'android/**/*.kts') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Write signing files
+        run: |
+          test -n "${ANDROID_KEYSTORE_BASE64}"
+          test -n "${ANDROID_KEYSTORE_PASSWORD}"
+          test -n "${ANDROID_KEY_ALIAS}"
+          test -n "${ANDROID_KEY_PASSWORD}"
+          echo "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > android/release.keystore
+          cat > android/key.properties <<EOF
+          storePassword=${ANDROID_KEYSTORE_PASSWORD}
+          keyPassword=${ANDROID_KEY_PASSWORD}
+          keyAlias=${ANDROID_KEY_ALIAS}
+          storeFile=../release.keystore
+          EOF
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Build Android release APK
+        run: |
+          VERSION_NAME="${TAG#v}"
+          flutter build apk --release --build-name "${VERSION_NAME}" --build-number "${BUILD_NUMBER}"
+          cp build/app/outputs/flutter-apk/app-release.apk "phi-res-extract-${TAG}-android-release.apk"
+        env:
+          TAG: ${{ inputs.tag }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+          GRADLE_USER_HOME: ~/.gradle
+
+      - name: Upload Android release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: phi-res-extract-android-release
+          path: phi-res-extract-${{ inputs.tag }}-android-release.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: Phi Res Extract ${{ inputs.tag }}
+          body: |
+            Android release APK for Phi Res Extract.
+
+            This APK does not bundle TapTap, the Phigros APK, charts, illustrations, or music. The app downloads the official APK at runtime from the lightweight metadata JSON and extracts resources on device.
+
+            Launcher icon source: original project artwork in `assets/branding/app_icon.svg`; no third-party or commercial icon assets are used.
+          files: phi-res-extract-${{ inputs.tag }}-android-release.apk
+          make_latest: true

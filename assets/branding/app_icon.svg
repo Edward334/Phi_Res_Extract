@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="96" y1="64" x2="420" y2="448" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1b7f8f"/>
+      <stop offset="0.58" stop-color="#243f6f"/>
+      <stop offset="1" stop-color="#2e6f4f"/>
+    </linearGradient>
+    <linearGradient id="tile" x1="128" y1="124" x2="388" y2="388" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f6fbff"/>
+      <stop offset="1" stop-color="#d8f4e4"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <path d="M122 170c0-30 24-54 54-54h160c30 0 54 24 54 54v172c0 30-24 54-54 54H176c-30 0-54-24-54-54V170Z" fill="#0f172a" opacity="0.28"/>
+  <rect x="106" y="100" width="300" height="300" rx="62" fill="url(#tile)"/>
+  <path d="M142 178h228M142 256h228M142 334h228" stroke="#1b7f8f" stroke-width="16" stroke-linecap="round" opacity="0.26"/>
+  <circle cx="184" cy="178" r="24" fill="#243f6f"/>
+  <circle cx="184" cy="256" r="24" fill="#2e6f4f"/>
+  <circle cx="184" cy="334" r="24" fill="#1b7f8f"/>
+  <path d="M236 320c0-55 21-99 63-99s63 44 63 99" fill="none" stroke="#243f6f" stroke-width="24" stroke-linecap="round"/>
+  <path d="M244 320c0 37 22 62 55 62s55-25 55-62" fill="none" stroke="#1b7f8f" stroke-width="24" stroke-linecap="round"/>
+  <path d="M300 196v196" stroke="#0f172a" stroke-width="18" stroke-linecap="round" opacity="0.82"/>
+  <path d="M272 242h84" stroke="#0f172a" stroke-width="18" stroke-linecap="round" opacity="0.82"/>
+  <path d="M150 128l-34 34M396 350l-34 34" stroke="#ffffff" stroke-width="18" stroke-linecap="round" opacity="0.64"/>
+</svg>

@@ -10,13 +10,23 @@ and manual dispatch:
 - Android debug APK: `phi-res-extract-android-debug`
 - Linux debug bundle: `phi-res-extract-linux-debug`
 
+Release APKs are built by the `Android Release` workflow and published under
+versioned GitHub Releases, for example `v0.1.0`. Release signing uses repository
+secrets (`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
+`ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`); the private keystore is not
+committed to the repository.
+
+The Android launcher icon is original project artwork. Source:
+`assets/branding/app_icon.svg`. No third-party or commercial icon assets are
+used.
+
 ## Android usage
 
-Install the APK from the `phi-res-extract-android-debug` artifact. The Android
-package does not bundle TapTap, the Phigros APK, or extracted resources. The
-`APK Metadata` workflow only resolves the latest official APK download address
-and publishes a small `taptap-apk.json` file under the `apk-latest` release.
-The JSON contains only the URL, version, size, MD5, and update date.
+Install the APK from the latest versioned GitHub Release. The Android package
+does not bundle TapTap, the Phigros APK, or extracted resources. The `APK
+Metadata` workflow only resolves the latest official APK download address and
+publishes a small `taptap-apk.json` file under the `apk-latest` release. The
+JSON contains only the URL, version, size, MD5, and update date.
 
 On Android, tap `下载并解包`. The app fetches that JSON, downloads the APK at
 runtime into its private data directory, shows download progress, then extracts
