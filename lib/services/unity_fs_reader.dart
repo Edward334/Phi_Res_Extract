@@ -46,6 +46,18 @@ class UnityTexture2D {
   bool get isRgb24 => format == 3 && data.length >= width * height * 3;
 }
 
+class UnityAudioClip {
+  const UnityAudioClip({
+    required this.name,
+    required this.bytes,
+    required this.extension,
+  });
+
+  final String name;
+  final Uint8List bytes;
+  final String extension;
+}
+
 class UnitySerializedObject {
   const UnitySerializedObject({
     required this.pathId,
@@ -212,6 +224,20 @@ class UnitySerializedFileReader {
           if (_readTexture2D(object.data, object.endian, resources)
               case final texture?)
             texture,
+    ];
+  }
+
+  List<UnityAudioClip> readAudioClips(
+    Uint8List source, {
+    Map<String, Uint8List> resources = const {},
+  }) {
+    final file = readFile(source);
+    return [
+      for (final object in file.objects)
+        if (object.classId == 83)
+          if (_readAudioClip(object.data, object.endian, resources)
+              case final clip?)
+            clip,
     ];
   }
 
@@ -427,6 +453,81 @@ class UnitySerializedFileReader {
     );
   }
 
+  UnityAudioClip? _readAudioClip(
+    Uint8List source,
+    Endian endian,
+    Map<String, Uint8List> resources,
+  ) {
+    final reader = _BinaryReader(source, endian: endian);
+    final name = reader.readAlignedString();
+    reader.readInt32();
+    final channels = reader.readInt32();
+    final frequency = reader.readInt32();
+    reader.readInt32();
+    reader.readFloat32();
+    reader.readByte();
+    reader.align(4);
+    reader.readInt32();
+    reader.readByte();
+    reader.readByte();
+    reader.readByte();
+    reader.align(4);
+
+    final stream = _readAudioStream(reader);
+    if (reader.position + 4 <= source.length) {
+      reader.readInt32();
+    }
+
+    Uint8List data;
+    if (stream.size > 0) {
+      final resourceName = stream.path.split('/').last;
+      final resource = resources[resourceName];
+      if (resource == null || stream.offset + stream.size > resource.length) {
+        return null;
+      }
+      data = Uint8List.sublistView(
+        resource,
+        stream.offset,
+        stream.offset + stream.size,
+      );
+    } else {
+      return null;
+    }
+
+    if (_startsWith(data, const [0x4f, 0x67, 0x67, 0x53])) {
+      return UnityAudioClip(name: name, bytes: data, extension: '.ogg');
+    }
+    if (_startsWith(data, const [0x52, 0x49, 0x46, 0x46])) {
+      return UnityAudioClip(name: name, bytes: data, extension: '.wav');
+    }
+    if (data.length >= 8 &&
+        data[4] == 0x66 &&
+        data[5] == 0x74 &&
+        data[6] == 0x79 &&
+        data[7] == 0x70) {
+      return UnityAudioClip(name: name, bytes: data, extension: '.m4a');
+    }
+    if (_startsWith(data, const [0x46, 0x53, 0x42, 0x35])) {
+      return UnityAudioClip(
+        name: name,
+        bytes: const Fsb5VorbisExtractor().extract(
+          data,
+          fallbackChannels: channels,
+          fallbackFrequency: frequency,
+        ),
+        extension: '.ogg',
+      );
+    }
+    return UnityAudioClip(name: name, bytes: data, extension: '.bytes');
+  }
+
+  _AudioStream _readAudioStream(_BinaryReader reader) {
+    final path = reader.readAlignedString();
+    final offset = reader.readUint64();
+    final size = reader.readUint64();
+    return _AudioStream(offset: offset, size: size, path: path);
+  }
+
   _TextureStream? _findTextureStream(Uint8List source, Endian endian) {
     for (var offset = 12; offset + 4 < source.length; offset += 4) {
       final length =
@@ -477,6 +578,18 @@ class UnitySerializedFileReader {
     }
     return null;
   }
+
+  bool _startsWith(Uint8List data, List<int> prefix) {
+    if (data.length < prefix.length) {
+      return false;
+    }
+    for (var index = 0; index < prefix.length; index += 1) {
+      if (data[index] != prefix[index]) {
+        return false;
+      }
+    }
+    return true;
+  }
 }
 
 class _TextureStream {
@@ -489,6 +602,475 @@ class _TextureStream {
   final int offset;
   final int size;
   final String path;
+}
+
+class _AudioStream {
+  const _AudioStream({
+    required this.offset,
+    required this.size,
+    required this.path,
+  });
+
+  final int offset;
+  final int size;
+  final String path;
+}
+
+class Fsb5VorbisExtractor {
+  const Fsb5VorbisExtractor();
+
+  Uint8List extract(
+    Uint8List source, {
+    int? fallbackChannels,
+    int? fallbackFrequency,
+  }) {
+    final reader = _BinaryReader(source, endian: Endian.little);
+    final magic = ascii.decode(reader.readBytes(4));
+    if (magic != 'FSB5') {
+      throw FormatException('Unsupported FSB magic: $magic');
+    }
+
+    final version = reader.readUint32();
+    final sampleCount = reader.readUint32();
+    final sampleHeadersSize = reader.readUint32();
+    final nameTableSize = reader.readUint32();
+    final dataSize = reader.readUint32();
+    final mode = reader.readUint32();
+    reader.skip(8 + 16 + 8);
+    if (version == 0) {
+      reader.readUint32();
+    }
+
+    if (mode != 15) {
+      throw FormatException('Unsupported FSB5 mode: $mode');
+    }
+    if (sampleCount != 1) {
+      throw FormatException('Unsupported FSB5 sample count: $sampleCount');
+    }
+
+    final raw = reader.readUint64();
+    var nextChunk = _bits(raw, 0, 1) == 1;
+    final frequencyBits = _bits(raw, 1, 4);
+    var channels = _bits(raw, 5, 1) + 1;
+    final dataOffset = _bits(raw, 6, 28) * 16;
+    final sampleFrames = _bits(raw, 34, 30);
+    int? vorbisCrc;
+    int? frequency = _frequencyValues[frequencyBits];
+
+    while (nextChunk) {
+      final chunk = reader.readUint32();
+      nextChunk = _bits(chunk, 0, 1) == 1;
+      final chunkSize = _bits(chunk, 1, 24);
+      final chunkType = _bits(chunk, 25, 7);
+      if (chunkType == 1 && chunkSize == 1) {
+        channels = reader.readByte();
+      } else if (chunkType == 2 && chunkSize == 4) {
+        frequency = reader.readUint32();
+      } else if (chunkType == 11 && chunkSize >= 4) {
+        vorbisCrc = reader.readUint32();
+        reader.skip(chunkSize - 4);
+      } else {
+        reader.skip(chunkSize);
+      }
+    }
+
+    frequency ??= fallbackFrequency;
+    if (frequency == null) {
+      throw const FormatException('FSB5 sample frequency is missing.');
+    }
+    if (channels <= 0) {
+      channels = fallbackChannels ?? channels;
+    }
+    if (vorbisCrc == null) {
+      throw const FormatException('FSB5 sample has no Vorbis metadata.');
+    }
+
+    final setupHeader = _setupHeaders[vorbisCrc];
+    if (setupHeader == null) {
+      throw FormatException('Unsupported FSB5 Vorbis header CRC: $vorbisCrc');
+    }
+
+    final dataStart = 60 +
+        (version == 0 ? 4 : 0) +
+        sampleHeadersSize +
+        nameTableSize +
+        dataOffset;
+    final dataEnd = dataStart + dataSize - dataOffset;
+    if (dataStart < 0 || dataEnd > source.length || dataStart > dataEnd) {
+      throw const FormatException('Invalid FSB5 sample data range.');
+    }
+    final packetData = Uint8List.sublistView(source, dataStart, dataEnd);
+
+    final output = BytesBuilder(copy: false);
+    var sequence = 0;
+    _addOggPage(
+      output,
+      _buildVorbisIdHeader(
+        channels: channels,
+        frequency: frequency,
+        blocksizeShort: _blocksizeShort,
+        blocksizeLong: _blocksizeLong,
+      ),
+      sequence: sequence,
+      granulePosition: 0,
+      bos: true,
+    );
+    sequence += 1;
+    _addOggPage(
+      output,
+      _buildVorbisCommentHeader(),
+      sequence: sequence,
+      granulePosition: 0,
+    );
+    sequence += 1;
+    _addOggPage(
+      output,
+      setupHeader,
+      sequence: sequence,
+      granulePosition: 0,
+    );
+    sequence += 1;
+
+    final packetReader = _BinaryReader(packetData, endian: Endian.little);
+    var previousBlocksize = 0;
+    var granulePosition = 0;
+    while (packetReader.position + 2 <= packetData.length) {
+      final packetSize = packetReader.readUint16();
+      if (packetSize == 0) {
+        break;
+      }
+      if (packetReader.position + packetSize > packetData.length) {
+        throw const FormatException('Invalid FSB5 Vorbis packet size.');
+      }
+      final packet = packetReader.readBytes(packetSize);
+      final blocksize = packet.isNotEmpty && packet[0] & 0x02 == 0
+          ? _blocksizeShort
+          : _blocksizeLong;
+      granulePosition = previousBlocksize == 0
+          ? 0
+          : granulePosition + ((blocksize + previousBlocksize) ~/ 4);
+      previousBlocksize = blocksize;
+      final eos = packetReader.position + 2 > packetData.length ||
+          ByteData.sublistView(
+                packetData,
+                packetReader.position,
+                packetReader.position + 2,
+              ).getUint16(0, Endian.little) ==
+              0;
+      _addOggPage(
+        output,
+        packet,
+        sequence: sequence,
+        granulePosition: granulePosition,
+        eos: eos,
+      );
+      sequence += 1;
+    }
+
+    if (sampleFrames <= 0) {
+      throw const FormatException('FSB5 sample frame count is missing.');
+    }
+    return output.takeBytes();
+  }
+
+  static const _blocksizeShort = 256;
+  static const _blocksizeLong = 2048;
+
+  static const _frequencyValues = {
+    1: 8000,
+    2: 11000,
+    3: 11025,
+    4: 16000,
+    5: 22050,
+    6: 24000,
+    7: 32000,
+    8: 44100,
+    9: 48000,
+  };
+
+  static final Map<int, Uint8List> _setupHeaders = {
+    3200735724: base64Decode(_setupHeaderQuality40),
+    950688206: base64Decode(_setupHeaderQuality41),
+  };
+
+  static int _bits(int value, int start, int length) {
+    return (value >> start) & ((1 << length) - 1);
+  }
+
+  static Uint8List _buildVorbisIdHeader({
+    required int channels,
+    required int frequency,
+    required int blocksizeShort,
+    required int blocksizeLong,
+  }) {
+    final output = BytesBuilder(copy: false);
+    output.addByte(0x01);
+    output.add(ascii.encode('vorbis'));
+    output.add(_uint32Le(0));
+    output.addByte(channels);
+    output.add(_uint32Le(frequency));
+    output.add(_uint32Le(0));
+    output.add(_uint32Le(0));
+    output.add(_uint32Le(0));
+    output.addByte(
+      (_ilog(blocksizeShort) - 1) | ((_ilog(blocksizeLong) - 1) << 4),
+    );
+    output.addByte(1);
+    return output.takeBytes();
+  }
+
+  static Uint8List _buildVorbisCommentHeader() {
+    final vendor = ascii.encode(
+      'Xiph.Org libVorbis I 20200704 (Reducing Environment)',
+    );
+    final output = BytesBuilder(copy: false);
+    output.addByte(0x03);
+    output.add(ascii.encode('vorbis'));
+    output.add(_uint32Le(vendor.length));
+    output.add(vendor);
+    output.add(_uint32Le(0));
+    output.addByte(1);
+    return output.takeBytes();
+  }
+
+  static int _ilog(int value) {
+    var bits = 0;
+    while (value > 0) {
+      bits += 1;
+      value >>= 1;
+    }
+    return bits;
+  }
+
+  static void _addOggPage(
+    BytesBuilder output,
+    Uint8List packet, {
+    required int sequence,
+    required int granulePosition,
+    bool bos = false,
+    bool eos = false,
+  }) {
+    final lacing = <int>[];
+    var remaining = packet.length;
+    while (remaining >= 255) {
+      lacing.add(255);
+      remaining -= 255;
+    }
+    lacing.add(remaining);
+    if (lacing.length > 255) {
+      throw const FormatException('Ogg packet is too large for one page.');
+    }
+
+    final page = BytesBuilder(copy: false);
+    page.add(ascii.encode('OggS'));
+    page.addByte(0);
+    page.addByte((bos ? 0x02 : 0) | (eos ? 0x04 : 0));
+    page.add(_int64Le(granulePosition));
+    page.add(_uint32Le(1));
+    page.add(_uint32Le(sequence));
+    page.add(_uint32Le(0));
+    page.addByte(lacing.length);
+    page.add(lacing);
+    page.add(packet);
+
+    final bytes = page.takeBytes();
+    final crc = _oggCrc(bytes);
+    bytes[22] = crc & 0xff;
+    bytes[23] = crc >> 8 & 0xff;
+    bytes[24] = crc >> 16 & 0xff;
+    bytes[25] = crc >> 24 & 0xff;
+    output.add(bytes);
+  }
+
+  static int _oggCrc(Uint8List bytes) {
+    var crc = 0;
+    for (final byte in bytes) {
+      crc =
+          ((crc << 8) & 0xffffffff) ^ _oggCrcTable[((crc >> 24) & 0xff) ^ byte];
+    }
+    return crc & 0xffffffff;
+  }
+
+  static final List<int> _oggCrcTable = _buildOggCrcTable();
+
+  static List<int> _buildOggCrcTable() {
+    return [
+      for (var index = 0; index < 256; index += 1)
+        _buildOggCrcTableEntry(index),
+    ];
+  }
+
+  static int _buildOggCrcTableEntry(int index) {
+    var value = index << 24;
+    for (var bit = 0; bit < 8; bit += 1) {
+      value = (value & 0x80000000) != 0
+          ? ((value << 1) ^ 0x04c11db7) & 0xffffffff
+          : (value << 1) & 0xffffffff;
+    }
+    return value;
+  }
+
+  static List<int> _uint32Le(int value) {
+    return [
+      value & 0xff,
+      value >> 8 & 0xff,
+      value >> 16 & 0xff,
+      value >> 24 & 0xff,
+    ];
+  }
+
+  static List<int> _int64Le(int value) {
+    return [
+      value & 0xff,
+      value >> 8 & 0xff,
+      value >> 16 & 0xff,
+      value >> 24 & 0xff,
+      value >> 32 & 0xff,
+      value >> 40 & 0xff,
+      value >> 48 & 0xff,
+      value >> 56 & 0xff,
+    ];
+  }
+
+  static const _setupHeaderQuality40 =
+      'BXZvcmJpcyVCQ1YBAEAAACRzGCpGpXMWhBAaQlAZ4xxCzmvsGUJMEYIcMkxbyyVzkCGkoEKIWyiB'
+      '0JBVAABAAACHQXgUhIpBCCGEJT1YkoMnPQghhIg5eBSEaUEIIYQQQgghhBBCCCGERTlokoMnQQgd'
+      'hOMwOAyD5Tj4HIRFOVgQgydB6CCED0K4moOsOQghhCQ1SFCDBjnoHITCLCiKgsQwuBaEBDUojILk'
+      'MMjUgwtCiJqDSTX4GoRnQXgWhGlBCCGEJEFIkIMGQcgYhEZBWJKDBjm4FITLQagahCo5CB+EIDRk'
+      'FQCQAACgoiiKoigKEBqyCgDIAAAQQFEUx3EcyZEcybEcCwgNWQUAAAEACAAAoEiKpEiO5EiSJFmS'
+      'JVmSJVmS5omqLMuyLMuyLMsyEBqyCgBIAABQUQxFcRQHCA1ZBQBkAAAIoDiKpViKpWiK54iOCISG'
+      'rAIAgAAABAAAEDRDUzxHlETPVFXXtm3btm3btm3btm3btm1blmUZCA1ZBQBAAAAQ0mlmqQaIMAMZ'
+      'BkJDVgEACAAAgBGKMMSA0JBVAABAAACAGEoOogmtOd+c46BZDppKsTkdnEi1eZKbirk555xzzsnm'
+      'nDHOOeecopxZDJoJrTnnnMSgWQqaCa0555wnsXnQmiqtOeeccc7pYJwRxjnnnCateZCajbU555wF'
+      'rWmOmkuxOeecSLl5UptLtTnnnHPOOeecc84555zqxekcnBPOOeecqL25lpvQxTnnnE/G6d6cEM45'
+      '55xzzjnnnHPOOeecIDRkFQAABABAEIaNYdwpCNLnaCBGEWIaMulB9+gwCRqDnELq0ehopJQ6CCWV'
+      'cVJKJwgNWQUAAAIAQAghhRRSSCGFFFJIIYUUYoghhhhyyimnoIJKKqmooowyyyyzzDLLLLPMOuys'
+      'sw47DDHEEEMrrcRSU2011lhr7jnnmoO0VlprrbVSSimllFIKQkNWAQAgAAAEQgYZZJBRSCGFFGKI'
+      'KaeccgoqqIDQkFUAACAAgAAAAABP8hzRER3RER3RER3RER3R8RzPESVREiVREi3TMjXTU0VVdWXX'
+      'lnVZt31b2IVd933d933d+HVhWJZlWZZlWZZlWZZlWZZlWZYgNGQVAAACAAAghBBCSCGFFFJIKcYY'
+      'c8w56CSUEAgNWQUAAAIACAAAAHAUR3EcyZEcSbIkS9IkzdIsT/M0TxM9URRF0zRV0RVdUTdtUTZl'
+      '0zVdUzZdVVZtV5ZtW7Z125dl2/d93/d93/d93/d93/d9XQdCQ1YBABIAADqSIymSIimS4ziOJElA'
+      'aMgqAEAGAEAAAIriKI7jOJIkSZIlaZJneZaomZrpmZ4qqkBoyCoAABAAQAAAAAAAAIqmeIqpeIqo'
+      'eI7oiJJomZaoqZoryqbsuq7ruq7ruq7ruq7ruq7ruq7ruq7ruq7ruq7ruq7ruq7ruq4LhIasAgAk'
+      'AAB0JEdyJEdSJEVSJEdygNCQVQCADACAAAAcwzEkRXIsy9I0T/M0TxM90RM901NFV3SB0JBVAAAg'
+      'AIAAAAAAAAAMybAUy9EcTRIl1VItVVMt1VJF1VNVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV'
+      'VVVVVVVN0zRNEwgNWQkAkAEAkBBTLS3GmgmLJGLSaqugYwxS7KWxSCpntbfKMYUYtV4ah5RREHup'
+      'JGOKQcwtpNApJq3WVEKFFKSYYyoVUg5SIDRkhQAQmgHgcBxAsixAsiwAAAAAAAAAkDQN0DwPsDQP'
+      'AAAAAAAAACRNAyxPAzTPAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABA0jRA8zxA8zwAAAAAAAAA0DwP8DwR8EQRAAAAAAAA'
+      'ACzPAzTRAzxRBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAABA0jRA8zxA8zwAAAAAAAAAsDwP8EQR0DwRAAAAAAAAACzPAzxR'
+      'BDzRAwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAEOAAABBg'
+      'IRQasiIAiBMAcEgSJAmSBM0DSJYFTYOmwTQBkmVB06BpME0AAAAAAAAAAAAAJE2DpkHTIIoASdOg'
+      'adA0iCIAAAAAAAAAAAAAkqZB06BpEEWApGnQNGgaRBEAAAAAAAAAAAAAzzQhihBFmCbAM02IIkQR'
+      'pgkAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAGHAAAAgwoQwUGrIiAIgTAHA4imUBAIDjOJYFAACO'
+      '41gWAABYliWKAABgWZooAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAYcAAACDChDBQashIAiAIAcCiKZQHHsSzgOJYFJMmy'
+      'AJYF0DyApgFEEQAIAAAocAAACLBBU2JxgEJDVgIAUQAABsWxLE0TRZKkaZoniiRJ0zxPFGma53me'
+      'acLzPM80IYqiaJoQRVE0TZimaaoqME1VFQAAUOAAABBgg6bE4gCFhqwEAEICAByKYlma5nmeJ4qm'
+      'qZokSdM8TxRF0TRNU1VJkqZ5niiKommapqqyLE3zPFEURdNUVVWFpnmeKIqiaaqq6sLzPE8URdE0'
+      'VdV14XmeJ4qiaJqq6roQRVE0TdNUTVV1XSCKpmmaqqqqrgtETxRNU1Vd13WB54miaaqqq7ouEE3T'
+      'VFVVdV1ZBpimaaqq68oyQFVV1XVdV5YBqqqqruu6sgxQVdd1XVmWZQCu67qyLMsCAAAOHAAAAoyg'
+      'k4wqi7DRhAsPQKEhKwKAKAAAwBimFFPKMCYhpBAaxiSEFEImJaXSUqogpFJSKRWEVEoqJaOUUmop'
+      'VRBSKamUCkIqJZVSAADYgQMA2IGFUGjISgAgDwCAMEYpxhhzTiKkFGPOOScRUoox55yTSjHmnHPO'
+      'SSkZc8w556SUzjnnnHNSSuacc845KaVzzjnnnJRSSuecc05KKSWEzkEnpZTSOeecEwAAVOAAABBg'
+      'o8jmBCNBhYasBABSAQAMjmNZmuZ5omialiRpmud5niiapiZJmuZ5nieKqsnzPE8URdE0VZXneZ4o'
+      'iqJpqirXFUXTNE1VVV2yLIqmaZqq6rowTdNUVdd1XZimaaqq67oubFtVVdV1ZRm2raqq6rqyDFzX'
+      'dWXZloEsu67s2rIAAPAEBwCgAhtWRzgpGgssNGQlAJABAEAYg5BCCCFlEEIKIYSUUggJAAAYcAAA'
+      'CDChDBQashIASAUAAIyx1lprrbXWQGettdZaa62AzFprrbXWWmuttdZaa6211lJrrbXWWmuttdZa'
+      'a6211lprrbXWWmuttdZaa6211lprrbXWWmuttdZaa6211lprrbXWWmstpZRSSimllFJKKaWUUkop'
+      'pZRSSgUA+lU4APg/2LA6wknRWGChISsBgHAAAMAYpRhzDEIppVQIMeacdFRai7FCiDHnJKTUWmzF'
+      'c85BKCGV1mIsnnMOQikpxVZjUSmEUlJKLbZYi0qho5JSSq3VWIwxqaTWWoutxmKMSSm01FqLMRYj'
+      'bE2ptdhqq7EYY2sqLbQYY4zFCF9kbC2m2moNxggjWywt1VprMMYY3VuLpbaaizE++NpSLDHWXAAA'
+      'd4MDAESCjTOsJJ0VjgYXGrISAAgJACAQUooxxhhzzjnnpFKMOeaccw5CCKFUijHGnHMOQgghlIwx'
+      '5pxzEEIIIYRSSsaccxBCCCGEkFLqnHMQQgghhBBKKZ1zDkIIIYQQQimlgxBCCCGEEEoopaQUQggh'
+      'hBBCCKmklEIIIYRSQighlZRSCCGEEEIpJaSUUgohhFJCCKGElFJKKYUQQgillJJSSimlEkoJJYQS'
+      'UikppRRKCCGUUkpKKaVUSgmhhBJKKSWllFJKIYQQSikFAAAcOAAABBhBJxlVFmGjCRcegEJDVgIA'
+      'ZAAAkKKUUiktRYIipRikGEtGFXNQWoqocgxSzalSziDmJJaIMYSUk1Qy5hRCDELqHHVMKQYtlRhC'
+      'xhik2HJLoXMOAAAAQQCAgJAAAAMEBTMAwOAA4XMQdAIERxsAgCBEZohEw0JweFAJEBFTAUBigkIu'
+      'AFRYXKRdXECXAS7o4q4DIQQhCEEsDqCABByccMMTb3jCDU7QKSp1IAAAAAAADQDwAACQXAAREdHM'
+      'YWRobHB0eHyAhIiMkAgAAAAAABoAfAAAJCVAREQ0cxgZGhscHR4fICEiIyQBAIAAAgAAAAAggAAE'
+      'BAQAAAAAAAIAAAAEBA==';
+
+  static const _setupHeaderQuality41 =
+      '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'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAEOAAABBg'
+      'IRQasiIAiBMAcEgSJAmSBM0DSJYFTYOmwTQBkmVB06BpME0AAAAAAAAAAAAAJE2DpkHTIIoASdOg'
+      'adA0iCIAAAAAAAAAAAAAkqZB06BpEEWApGnQNGgaRBEAAAAAAAAAAAAAzzQhihBFmCbAM02IIkQR'
+      'pgkAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAGHAAAAgwoQwUGrIiAIgTAHA4imUBAIDjOJYFAACO'
+      '41gWAABYliWKAABgWZooAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAYcAAACDChDBQashIAiAIAcCiKZQHHsSzgOJYFJMmy'
+      'AJYF0DyApgFEEQAIAAAocAAACLBBU2JxgEJDVgIAUQAABsWxLE0TRZKkaZoniiRJ0zxPFGma53me'
+      'acLzPM80IYqiaJoQRVE0TZimaaoqME1VFQAAUOAAABBgg6bE4gCFhqwEAEICAByKYlma5nmeJ4qm'
+      'qZokSdM8TxRF0TRNU1VJkqZ5niiKommapqqyLE3zPFEURdNUVVWFpnmeKIqiaaqq6sLzPE8URdE0'
+      'VdV14XmeJ4qiaJqq6roQRVE0TdNUTVV1XSCKpmmaqqqqrgtETxRNU1Vd13WB54miaaqqq7ouEE3T'
+      'VFVVdV1ZBpimaaqq68oyQFVV1XVdV5YBqqqqruu6sgxQVdd1XVmWZQCu67qyLMsCAAAOHAAAAoyg'
+      'k4wqi7DRhAsPQKEhKwKAKAAAwBimFFPKMCYhpBAaxiSEFEImJaXSUqogpFJSKRWEVEoqJaOUUmop'
+      'VRBSKamUCkIqJZVSAADYgQMA2IGFUGjISgAgDwCAMEYpxhhzTiKkFGPOOScRUoox55yTSjHmnHPO'
+      'SSkZc8w556SUzjnnnHNSSuacc845KaVzzjnnnJRSSuecc05KKSWEzkEnpZTSOeecEwAAVOAAABBg'
+      'o8jmBCNBhYasBABSAQAMjmNZmuZ5omialiRpmud5niiapiZJmuZ5nieKqsnzPE8URdE0VZXneZ4o'
+      'iqJpqirXFUXTNE1VVV2yLIqmaZqq6rowTdNUVdd1XZimaaqq67oubFtVVdV1ZRm2raqq6rqyDFzX'
+      'dWXZloEsu67s2rIAAPAEBwCgAhtWRzgpGgssNGQlAJABAEAYg5BCCCFlEEIKIYSUUggJAAAYcAAA'
+      'CDChDBQashIASAUAAIyx1lprrbXWQGettdZaa62AzFprrbXWWmuttdZaa6211lJrrbXWWmuttdZa'
+      'a6211lprrbXWWmuttdZaa6211lprrbXWWmuttdZaa6211lprrbXWWmstpZRSSimllFJKKaWUUkop'
+      'pZRSSgUA+lU4APg/2LA6wknRWGChISsBgHAAAMAYpRhzDEIppVQIMeacdFRai7FCiDHnJKTUWmzF'
+      'c85BKCGV1mIsnnMOQikpxVZjUSmEUlJKLbZYi0qho5JSSq3VWIwxqaTWWoutxmKMSSm01FqLMRYj'
+      'bE2ptdhqq7EYY2sqLbQYY4zFCF9kbC2m2moNxggjWywt1VprMMYY3VuLpbaaizE++NpSLDHWXAAA'
+      'd4MDAESCjTOsJJ0VjgYXGrISAAgJACAQUooxxhhzzjnnpFKMOeaccw5CCKFUijHGnHMOQgghlIwx'
+      '5pxzEEIIIYRSSsaccxBCCCGEkFLqnHMQQgghhBBKKZ1zDkIIIYQQQimlgxBCCCGEEEoopaQUQggh'
+      'hBBCCKmklEIIIYRSQighlZRSCCGEEEIpJaSUUgohhFJCCKGElFJKKYUQQgillJJSSimlEkoJJYQS'
+      'UikppRRKCCGUUkpKKaVUSgmhhBJKKSWllFJKIYQQSikFAAAcOAAABBhBJxlVFmGjCRcegEJDVgIA'
+      'ZAAAkKKUUiktRYIipRikGEtGFXNQWoqocgxSzalSziDmJJaIMYSUk1Qy5hRCDELqHHVMKQYtlRhC'
+      'xhik2HJLoXMOAAAAQQCAgJAAAAMEBTMAwOAA4XMQdAIERxsAgCBEZohEw0JweFAJEBFTAUBigkIu'
+      'AFRYXKRdXECXAS7o4q4DIQQhCEEsDqCABByccMMTb3jCDU7QKSp1IAAAAAAADADwAACQXAAREdHM'
+      'YWRobHB0eHyAhIiMkAgAAAAAABgAfAAAJCVAREQ0cxgZGhscHR4fICEiIyQBAIAAAgAAAAAggAAE'
+      'BAQAAAAAAAIAAAAEBA==';
 }
 
 class PngRgb24Encoder {

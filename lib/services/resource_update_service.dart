@@ -340,24 +340,32 @@ class ResourceUpdateService {
         throw const FormatException('Addressables 中没有找到谱面资源');
       }
       final illustrationAssets = _selectIllustrationAssets(assets);
-      final totalAssets = chartAssets.length + illustrationAssets.length;
+      final musicAssets = assets.where(_isMusicAsset).toList();
+      final totalAssets =
+          chartAssets.length + illustrationAssets.length + musicAssets.length;
 
       yield ResourceUpdateEvent(
         stage: ResourceUpdateStage.extractingAssets,
-        message: '正在端内解压谱面和曲绘 0 / $totalAssets',
+        message: '正在端内解压谱面、曲绘和音频 0 / $totalAssets',
         progress: 0,
       );
 
       final chartsBySong = <String, Map<String, String>>{};
       final illustrationsBySong = <String, String>{};
+      final musicBySong = <String, String>{};
       final assetsByBundle = <String, List<AddressableAsset>>{};
-      for (final asset in [...chartAssets, ...illustrationAssets]) {
+      for (final asset in [
+        ...chartAssets,
+        ...illustrationAssets,
+        ...musicAssets
+      ]) {
         assetsByBundle.putIfAbsent(asset.bundle, () => []).add(asset);
       }
 
       var processed = 0;
       var extracted = 0;
       var illustrations = 0;
+      var music = 0;
       final input = InputFileStream(apk.path);
       try {
         final archive = ZipDecoder().decodeBuffer(input);
@@ -377,13 +385,16 @@ class ResourceUpdateService {
               final unityFiles = _unityFsReader.readFiles(bundleBytes);
               final resources = {
                 for (final file in unityFiles)
-                  if (file.path.endsWith('.resS'))
+                  if (file.path.endsWith('.resS') ||
+                      file.path.endsWith('.resource'))
                     file.path.split('/').last: file.data,
               };
               final textAssets = <String, UnityTextAsset>{};
               final textures = <String, UnityTexture2D>{};
+              final audioClips = <String, UnityAudioClip>{};
               for (final file in unityFiles) {
-                if (file.path.endsWith('.resS')) {
+                if (file.path.endsWith('.resS') ||
+                    file.path.endsWith('.resource')) {
                   continue;
                 }
                 for (final text
@@ -395,6 +406,12 @@ class ResourceUpdateService {
                   resources: resources,
                 )) {
                   textures[texture.name] = texture;
+                }
+                for (final clip in _serializedReader.readAudioClips(
+                  file.data,
+                  resources: resources,
+                )) {
+                  audioClips[clip.name] = clip;
                 }
               }
 
@@ -420,6 +437,28 @@ class ResourceUpdateService {
                   chartsBySong.putIfAbsent(
                       songId, () => <String, String>{})[level] = relativePath;
                   extracted += 1;
+                  continue;
+                }
+
+                final musicTrackId = _musicTrackId(asset.key);
+                if (musicTrackId != null) {
+                  final clip = audioClips['music'] ??
+                      (audioClips.isEmpty ? null : audioClips.values.first);
+                  if (clip == null) {
+                    continue;
+                  }
+
+                  final songId = _songIdFromTrackId(musicTrackId);
+                  final musicDir = Directory(p.join(root.path, 'music'));
+                  await musicDir.create(recursive: true);
+                  final relativePath =
+                      p.posix.join('music', '$songId${clip.extension}');
+                  await File(p.join(root.path, relativePath)).writeAsBytes(
+                    clip.bytes,
+                    flush: false,
+                  );
+                  musicBySong[songId] = relativePath;
+                  music += 1;
                   continue;
                 }
 
@@ -451,7 +490,7 @@ class ResourceUpdateService {
             processed += entry.value.length;
             yield ResourceUpdateEvent(
               stage: ResourceUpdateStage.extractingAssets,
-              message: '正在端内解压谱面和曲绘 $processed / $totalAssets',
+              message: '正在端内解压谱面、曲绘和音频 $processed / $totalAssets',
               progress: processed / totalAssets,
             );
           }
@@ -480,6 +519,7 @@ class ResourceUpdateService {
             entry.value,
             songInfo[entry.key],
             illustrationsBySong[entry.key],
+            musicBySong[entry.key],
           ),
       ]..sort((left, right) =>
           (left['title'] as String).compareTo(right['title'] as String));
@@ -489,7 +529,7 @@ class ResourceUpdateService {
           'schemaVersion': 1,
           'generatedAt': generatedAt,
           'source':
-              'Android APK GameInformation, Addressables, TextAsset charts, and RGB24 Texture2D illustrations',
+              'Android APK GameInformation, Addressables, TextAsset charts, RGB24 Texture2D illustrations, and AudioClip music',
           'apkVersionName': release.versionName,
           'apkVersionCode': release.versionCode,
           'songs': songs,
@@ -500,7 +540,7 @@ class ResourceUpdateService {
       yield ResourceUpdateEvent(
         stage: ResourceUpdateStage.complete,
         message:
-            '已完成 APK 下载、曲目信息解析、$extracted 个谱面和 $illustrations 张曲绘解压；音频解析后续接入。',
+            '已完成 APK 下载、曲目信息解析、$extracted 个谱面、$illustrations 张曲绘和 $music 首音频解压。',
         progress: 1,
       );
     } on Object catch (error) {
@@ -530,6 +570,10 @@ class ResourceUpdateService {
     return _chartLevel(asset.key) != null;
   }
 
+  static bool _isMusicAsset(AddressableAsset asset) {
+    return _musicTrackId(asset.key) != null;
+  }
+
   static String? _chartTrackId(String key) {
     final index = key.indexOf('/Chart_');
     if (index <= 0) {
@@ -541,6 +585,19 @@ class ResourceUpdateService {
   static String? _chartLevel(String key) {
     final match = RegExp(r'/Chart_(EZ|HD|IN|AT)\.json$').firstMatch(key);
     return match?.group(1);
+  }
+
+  static String? _musicTrackId(String key) {
+    final normalized = key.toLowerCase();
+    const suffix = '/music.wav';
+    if (!normalized.endsWith(suffix)) {
+      return null;
+    }
+    final index = normalized.length - suffix.length;
+    if (index <= 0) {
+      return null;
+    }
+    return key.substring(0, index);
   }
 
   static List<AddressableAsset> _selectIllustrationAssets(
@@ -607,6 +664,7 @@ class ResourceUpdateService {
     Map<String, String> chartPaths,
     Song? info,
     String? illustrationPath,
+    String? musicPath,
   ) {
     return {
       'id': songId,
@@ -616,7 +674,7 @@ class ResourceUpdateService {
       'charters': info?.charters ?? const <String>[],
       'difficulties': info?.difficulties ?? const <double>[],
       'illustrationPath': illustrationPath,
-      'musicPath': null,
+      'musicPath': musicPath,
       'chartPaths': {
         for (final level in chartLevels)
           if (chartPaths[level] case final path?) level: path,
