@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import 'apk_addressables_reader.dart';
+
 enum ResourceUpdateStage {
   resolving,
   downloading,
@@ -107,6 +109,7 @@ class ResourceUpdateService {
   final String scriptPath;
   final String pythonExecutable;
   final String apkMetadataUrl;
+  final _addressablesReader = const ApkAddressablesReader();
 
   bool get canUpdate => libraryRoot.trim().isNotEmpty;
   bool get usesRemoteApkMetadata => Platform.isAndroid;
@@ -296,13 +299,30 @@ class ResourceUpdateService {
 
       yield const ResourceUpdateEvent(
         stage: ResourceUpdateStage.extractingMetadata,
-        message: 'APK 已下载，下一步执行端内资源解析',
+        message: '正在端内解析 Addressables 目录',
         progress: 1,
+      );
+
+      final assets = await _addressablesReader.readTrackAssets(apk);
+      final catalogDir = Directory(p.join(root.path, 'catalog'));
+      await catalogDir.create(recursive: true);
+      await File(p.join(catalogDir.path, 'addressables.json')).writeAsString(
+        jsonEncode({
+          'generatedAt': DateTime.now().toUtc().toIso8601String(),
+          'apk': {
+            'versionName': release.versionName,
+            'versionCode': release.versionCode,
+            'size': release.size,
+          },
+          'assets': assets.map((asset) => asset.toJson()).toList(),
+        }),
+        encoding: utf8,
       );
 
       yield ResourceUpdateEvent(
         stage: ResourceUpdateStage.failed,
-        message: '端内 APK 解析器尚未接入；已完成 APK 下载，文件保存在应用私有目录：${apk.path}',
+        message:
+            '已完成 APK 下载和 Addressables 目录解析，共 ${assets.length} 个资源；Unity bundle/谱面/音频解析器尚未接入。',
       );
     } on Object catch (error) {
       yield ResourceUpdateEvent(
