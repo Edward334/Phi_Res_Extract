@@ -118,6 +118,7 @@ class ResourceUpdateService {
   final _gameInformationReader = const GameInformationReader();
   final _unityFsReader = const UnityFsReader();
   final _serializedReader = const UnitySerializedFileReader();
+  final _pngEncoder = const PngRgb24Encoder();
 
   bool get canUpdate => libraryRoot.trim().isNotEmpty;
   bool get usesRemoteApkMetadata => Platform.isAndroid;
@@ -338,21 +339,25 @@ class ResourceUpdateService {
       if (chartAssets.isEmpty) {
         throw const FormatException('Addressables 中没有找到谱面资源');
       }
+      final illustrationAssets = _selectIllustrationAssets(assets);
+      final totalAssets = chartAssets.length + illustrationAssets.length;
 
       yield ResourceUpdateEvent(
         stage: ResourceUpdateStage.extractingAssets,
-        message: '正在端内解压谱面 0 / ${chartAssets.length}',
+        message: '正在端内解压谱面和曲绘 0 / $totalAssets',
         progress: 0,
       );
 
       final chartsBySong = <String, Map<String, String>>{};
+      final illustrationsBySong = <String, String>{};
       final assetsByBundle = <String, List<AddressableAsset>>{};
-      for (final asset in chartAssets) {
+      for (final asset in [...chartAssets, ...illustrationAssets]) {
         assetsByBundle.putIfAbsent(asset.bundle, () => []).add(asset);
       }
 
       var processed = 0;
       var extracted = 0;
+      var illustrations = 0;
       final input = InputFileStream(apk.path);
       try {
         final archive = ZipDecoder().decodeBuffer(input);
@@ -369,39 +374,76 @@ class ResourceUpdateService {
               final bundleBytes = bundleContent is Uint8List
                   ? bundleContent
                   : Uint8List.fromList(bundleContent as List<int>);
+              final unityFiles = _unityFsReader.readFiles(bundleBytes);
+              final resources = {
+                for (final file in unityFiles)
+                  if (file.path.endsWith('.resS'))
+                    file.path.split('/').last: file.data,
+              };
               final textAssets = <String, UnityTextAsset>{};
-              for (final file in _unityFsReader.readFiles(bundleBytes)) {
+              final textures = <String, UnityTexture2D>{};
+              for (final file in unityFiles) {
+                if (file.path.endsWith('.resS')) {
+                  continue;
+                }
                 for (final text
                     in _serializedReader.readTextAssets(file.data)) {
                   textAssets[text.name] = text;
+                }
+                for (final texture in _serializedReader.readTexture2Ds(
+                  file.data,
+                  resources: resources,
+                )) {
+                  textures[texture.name] = texture;
                 }
               }
 
               for (final asset in entry.value) {
                 final level = _chartLevel(asset.key);
                 final trackId = _chartTrackId(asset.key);
-                if (level == null || trackId == null) {
-                  continue;
-                }
-                final text = textAssets['Chart_$level'];
-                if (text == null) {
+                if (level != null && trackId != null) {
+                  final text = textAssets['Chart_$level'];
+                  if (text == null) {
+                    continue;
+                  }
+
+                  final chartDir =
+                      Directory(p.join(root.path, 'chart', trackId));
+                  await chartDir.create(recursive: true);
+                  final relativePath =
+                      p.posix.join('chart', trackId, '$level.json');
+                  await File(p.join(root.path, relativePath)).writeAsBytes(
+                    text.bytes,
+                    flush: false,
+                  );
+                  final songId = _songIdFromTrackId(trackId);
+                  chartsBySong.putIfAbsent(
+                      songId, () => <String, String>{})[level] = relativePath;
+                  extracted += 1;
                   continue;
                 }
 
-                final chartDir = Directory(p.join(root.path, 'chart', trackId));
-                await chartDir.create(recursive: true);
+                final illustrationTrackId = _illustrationTrackId(asset.key);
+                final illustrationName = _illustrationName(asset.key);
+                if (illustrationTrackId == null || illustrationName == null) {
+                  continue;
+                }
+                final texture = textures[illustrationName];
+                if (texture == null || !texture.isRgb24) {
+                  continue;
+                }
+
+                final songId = _songIdFromTrackId(illustrationTrackId);
+                final imageDir = Directory(p.join(root.path, 'illustration'));
+                await imageDir.create(recursive: true);
                 final relativePath =
-                    p.posix.join('chart', trackId, '$level.json');
+                    p.posix.join('illustration', '$songId.png');
                 await File(p.join(root.path, relativePath)).writeAsBytes(
-                  text.bytes,
+                  _pngEncoder.encode(texture),
                   flush: false,
                 );
-                final songId = trackId.endsWith('.0')
-                    ? trackId.substring(0, trackId.length - 2)
-                    : trackId;
-                chartsBySong.putIfAbsent(
-                    songId, () => <String, String>{})[level] = relativePath;
-                extracted += 1;
+                illustrationsBySong[songId] = relativePath;
+                illustrations += 1;
               }
               bundleFile.clear();
             }
@@ -409,8 +451,8 @@ class ResourceUpdateService {
             processed += entry.value.length;
             yield ResourceUpdateEvent(
               stage: ResourceUpdateStage.extractingAssets,
-              message: '正在端内解压谱面 $processed / ${chartAssets.length}',
-              progress: processed / chartAssets.length,
+              message: '正在端内解压谱面和曲绘 $processed / $totalAssets',
+              progress: processed / totalAssets,
             );
           }
         } finally {
@@ -433,7 +475,12 @@ class ResourceUpdateService {
       final generatedAt = DateTime.now().toUtc().toIso8601String();
       final songs = [
         for (final entry in chartsBySong.entries)
-          _catalogSongJson(entry.key, entry.value, songInfo[entry.key]),
+          _catalogSongJson(
+            entry.key,
+            entry.value,
+            songInfo[entry.key],
+            illustrationsBySong[entry.key],
+          ),
       ]..sort((left, right) =>
           (left['title'] as String).compareTo(right['title'] as String));
 
@@ -442,7 +489,7 @@ class ResourceUpdateService {
           'schemaVersion': 1,
           'generatedAt': generatedAt,
           'source':
-              'Android APK GameInformation, Addressables, and TextAsset chart bundles',
+              'Android APK GameInformation, Addressables, TextAsset charts, and RGB24 Texture2D illustrations',
           'apkVersionName': release.versionName,
           'apkVersionCode': release.versionCode,
           'songs': songs,
@@ -452,7 +499,8 @@ class ResourceUpdateService {
 
       yield ResourceUpdateEvent(
         stage: ResourceUpdateStage.complete,
-        message: '已完成 APK 下载、曲目信息解析和 $extracted 个谱面解压；曲绘和音频解析后续接入。',
+        message:
+            '已完成 APK 下载、曲目信息解析、$extracted 个谱面和 $illustrations 张曲绘解压；音频解析后续接入。',
         progress: 1,
       );
     } on Object catch (error) {
@@ -495,10 +543,70 @@ class ResourceUpdateService {
     return match?.group(1);
   }
 
+  static List<AddressableAsset> _selectIllustrationAssets(
+    List<AddressableAsset> assets,
+  ) {
+    final selected = <String, AddressableAsset>{};
+    for (final asset in assets) {
+      final trackId = _illustrationTrackId(asset.key);
+      if (trackId == null) {
+        continue;
+      }
+      final current = selected[trackId];
+      if (current == null ||
+          _illustrationPriority(asset.key) <
+              _illustrationPriority(current.key)) {
+        selected[trackId] = asset;
+      }
+    }
+    return selected.values.toList();
+  }
+
+  static int _illustrationPriority(String key) {
+    if (key.contains('/IllustrationLowRes.')) {
+      return 0;
+    }
+    if (key.contains('/Illustration.')) {
+      return 1;
+    }
+    if (key.contains('/IllustrationBlur.')) {
+      return 2;
+    }
+    return 99;
+  }
+
+  static String? _illustrationTrackId(String key) {
+    final index = key.indexOf('/Illustration');
+    if (index <= 0 || _illustrationPriority(key) == 99) {
+      return null;
+    }
+    return key.substring(0, index);
+  }
+
+  static String? _illustrationName(String key) {
+    if (key.contains('/IllustrationLowRes.')) {
+      return 'IllustrationLowRes';
+    }
+    if (key.contains('/IllustrationBlur.')) {
+      return 'IllustrationBlur';
+    }
+    if (key.contains('/Illustration.')) {
+      return 'Illustration';
+    }
+    return null;
+  }
+
+  static String _songIdFromTrackId(String trackId) {
+    return trackId.endsWith('.0')
+        ? trackId.substring(0, trackId.length - 2)
+        : trackId;
+  }
+
   static Map<String, dynamic> _catalogSongJson(
     String songId,
     Map<String, String> chartPaths,
     Song? info,
+    String? illustrationPath,
   ) {
     return {
       'id': songId,
@@ -507,7 +615,7 @@ class ResourceUpdateService {
       'illustrator': info?.illustrator ?? '',
       'charters': info?.charters ?? const <String>[],
       'difficulties': info?.difficulties ?? const <double>[],
-      'illustrationPath': null,
+      'illustrationPath': illustrationPath,
       'musicPath': null,
       'chartPaths': {
         for (final level in chartLevels)

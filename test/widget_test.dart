@@ -1,7 +1,10 @@
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:phigros_library/main.dart';
 import 'package:phigros_library/models/song.dart';
 import 'package:phigros_library/services/catalog_repository.dart';
+import 'package:phigros_library/services/unity_fs_reader.dart';
 
 void main() {
   testWidgets('shows bundled empty catalog state', (tester) async {
@@ -51,5 +54,18 @@ void main() {
 
     expect(song.levels.map((level) => level.code), ['EZ', 'HD', 'IN']);
     expect(song.levels.last.difficulty, 12.6);
+  });
+
+  test('encodes RGB24 textures as PNG', () {
+    final texture = UnityTexture2D(
+      name: 'pixel',
+      width: 1,
+      height: 1,
+      format: 3,
+      data: Uint8List.fromList([0xff, 0x00, 0x00]),
+    );
+
+    final png = const PngRgb24Encoder().encode(texture);
+    expect(png.take(8), [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   });
 }

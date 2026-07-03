@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 class UnityFsFile {
@@ -25,6 +26,24 @@ class UnityTextAsset {
   final Uint8List bytes;
 
   String get text => utf8.decode(bytes);
+}
+
+class UnityTexture2D {
+  const UnityTexture2D({
+    required this.name,
+    required this.width,
+    required this.height,
+    required this.format,
+    required this.data,
+  });
+
+  final String name;
+  final int width;
+  final int height;
+  final int format;
+  final Uint8List data;
+
+  bool get isRgb24 => format == 3 && data.length >= width * height * 3;
 }
 
 class UnitySerializedObject {
@@ -179,6 +198,20 @@ class UnitySerializedFileReader {
     return [
       for (final object in file.objects)
         if (object.classId == 49) _readTextAsset(object.data, object.endian),
+    ];
+  }
+
+  List<UnityTexture2D> readTexture2Ds(
+    Uint8List source, {
+    Map<String, Uint8List> resources = const {},
+  }) {
+    final file = readFile(source);
+    return [
+      for (final object in file.objects)
+        if (object.classId == 28)
+          if (_readTexture2D(object.data, object.endian, resources)
+              case final texture?)
+            texture,
     ];
   }
 
@@ -337,6 +370,180 @@ class UnitySerializedFileReader {
     final name = reader.readAlignedString();
     final bytes = reader.readAlignedBytes();
     return UnityTextAsset(name: name, bytes: bytes);
+  }
+
+  UnityTexture2D? _readTexture2D(
+    Uint8List source,
+    Endian endian,
+    Map<String, Uint8List> resources,
+  ) {
+    final reader = _BinaryReader(source, endian: endian);
+    final name = reader.readAlignedString();
+    reader.readInt32();
+    reader.readInt32();
+    final width = reader.readInt32();
+    final height = reader.readInt32();
+    reader.readInt32();
+    reader.readInt32();
+    final format = reader.readInt32();
+
+    Uint8List data;
+    final stream = _findTextureStream(source, endian);
+    if (stream != null && stream.size > 0) {
+      final resourceName = stream.path.split('/').last;
+      final resource = resources[resourceName];
+      if (resource == null || stream.offset + stream.size > resource.length) {
+        return null;
+      }
+      data = Uint8List.sublistView(
+        resource,
+        stream.offset,
+        stream.offset + stream.size,
+      );
+    } else {
+      final imageSizeOffset =
+          _findImageDataSizeOffset(source, endian, width, height, format);
+      if (imageSizeOffset == null) {
+        return null;
+      }
+      final imageSize = ByteData.sublistView(
+        source,
+        imageSizeOffset,
+        imageSizeOffset + 4,
+      ).getUint32(0, endian);
+      data = Uint8List.sublistView(
+        source,
+        imageSizeOffset + 4,
+        imageSizeOffset + 4 + imageSize,
+      );
+    }
+
+    return UnityTexture2D(
+      name: name,
+      width: width,
+      height: height,
+      format: format,
+      data: data,
+    );
+  }
+
+  _TextureStream? _findTextureStream(Uint8List source, Endian endian) {
+    for (var offset = 12; offset + 4 < source.length; offset += 4) {
+      final length =
+          ByteData.sublistView(source, offset, offset + 4).getInt32(0, endian);
+      final pathStart = offset + 4;
+      final pathEnd = pathStart + length;
+      if (length <= 0 || pathEnd > source.length) {
+        continue;
+      }
+      final path = utf8.decode(
+        source.sublist(pathStart, pathEnd),
+        allowMalformed: true,
+      );
+      if (!path.startsWith('archive:/') || !path.endsWith('.resS')) {
+        continue;
+      }
+      final streamReader = _BinaryReader(
+        source,
+        position: offset - 12,
+        endian: endian,
+      );
+      return _TextureStream(
+        offset: streamReader.readUint64(),
+        size: streamReader.readUint32(),
+        path: path,
+      );
+    }
+    return null;
+  }
+
+  int? _findImageDataSizeOffset(
+    Uint8List source,
+    Endian endian,
+    int width,
+    int height,
+    int format,
+  ) {
+    if (format != 3) {
+      return null;
+    }
+    final expected = width * height * 3;
+    for (var offset = 0; offset + 4 <= source.length; offset += 4) {
+      final value =
+          ByteData.sublistView(source, offset, offset + 4).getUint32(0, endian);
+      if (value == expected && offset + 4 + value <= source.length) {
+        return offset;
+      }
+    }
+    return null;
+  }
+}
+
+class _TextureStream {
+  const _TextureStream({
+    required this.offset,
+    required this.size,
+    required this.path,
+  });
+
+  final int offset;
+  final int size;
+  final String path;
+}
+
+class PngRgb24Encoder {
+  const PngRgb24Encoder();
+
+  Uint8List encode(UnityTexture2D texture) {
+    if (!texture.isRgb24) {
+      throw FormatException('Unsupported Texture2D format: ${texture.format}');
+    }
+    final raw = BytesBuilder(copy: false);
+    final stride = texture.width * 3;
+    for (var y = texture.height - 1; y >= 0; y -= 1) {
+      raw.addByte(0);
+      raw.add(
+          Uint8List.sublistView(texture.data, y * stride, y * stride + stride));
+    }
+
+    final png = BytesBuilder(copy: false);
+    png.add([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    _addChunk(
+      png,
+      'IHDR',
+      _uint32(texture.width) + _uint32(texture.height) + [8, 2, 0, 0, 0],
+    );
+    _addChunk(png, 'IDAT', ZLibEncoder().convert(raw.takeBytes()));
+    _addChunk(png, 'IEND', const []);
+    return png.takeBytes();
+  }
+
+  void _addChunk(BytesBuilder output, String type, List<int> data) {
+    final typeBytes = ascii.encode(type);
+    output.add(_uint32(data.length));
+    output.add(typeBytes);
+    output.add(data);
+    output.add(_uint32(_crc32([...typeBytes, ...data])));
+  }
+
+  List<int> _uint32(int value) {
+    return [
+      value >> 24 & 0xff,
+      value >> 16 & 0xff,
+      value >> 8 & 0xff,
+      value & 0xff,
+    ];
+  }
+
+  int _crc32(List<int> data) {
+    var crc = 0xffffffff;
+    for (final byte in data) {
+      crc ^= byte;
+      for (var bit = 0; bit < 8; bit += 1) {
+        crc = (crc & 1) == 1 ? (crc >> 1) ^ 0xedb88320 : crc >> 1;
+      }
+    }
+    return (crc ^ 0xffffffff) & 0xffffffff;
   }
 }
 
