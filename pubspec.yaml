@@ -1,7 +1,7 @@
 name: phigros_library
 description: A Flutter client and updater for a local Phigros resource library.
 publish_to: "none"
-version: 0.1.3+4
+version: 0.1.4+5
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
@@ -14,8 +14,6 @@ dependencies:
   crypto: ^3.0.7
   path: ^1.9.0
   path_provider: ^2.1.6
-  share_plus: ^13.2.0
-
 dev_dependencies:
   flutter_test:
     sdk: flutter

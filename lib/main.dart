@@ -1,8 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
-import 'package:share_plus/share_plus.dart';
+import 'package:flutter/services.dart';
 
 import 'models/song.dart';
 import 'services/catalog_repository.dart';
@@ -40,6 +41,10 @@ class LibraryHome extends StatefulWidget {
 }
 
 class _LibraryHomeState extends State<LibraryHome> {
+  static const _phiraExportChannel = MethodChannel(
+    'io.github.edward334.phigroslibrary/phira_export',
+  );
+
   CatalogRepository? _repository;
   final _player = AudioPlayer();
   PhiraExportService? _exporter;
@@ -324,33 +329,60 @@ class _LibraryHomeState extends State<LibraryHome> {
 
   Future<void> _exportPhiraPackage(Song song) async {
     try {
-      final result = _exporter!.exportSong(song);
-      if (mounted) {
-        if (result.files.isNotEmpty) {
-          await SharePlus.instance.share(
-            ShareParams(
-              title: '分享 Phira 谱面',
-              subject: song.title,
-              text: 'Phigros 资源库导出的 Phira 谱面：${song.title}',
-              files: [
-                for (final file in result.files)
-                  XFile(file.path, mimeType: 'application/octet-stream'),
-              ],
-              sharePositionOrigin: _shareOrigin(context),
-            ),
-          );
-        }
+      final selectedLevels = await _selectExportLevels(song);
+      if (!mounted || selectedLevels == null) {
+        return;
+      }
+      if (selectedLevels.isEmpty) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('请至少选择一个难度。')));
+        return;
+      }
+
+      final exporter = _exporter!;
+      final result = exporter.exportSong(
+        song,
+        levels: selectedLevels,
+        outputDirectory:
+            Platform.isAndroid ? null : exporter.defaultOutputDirectory,
+      );
+      if (result.exported == 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('没有可导出的谱面，跳过 ${result.skipped} 个。')),
+        );
+        return;
+      }
+
+      if (Platform.isAndroid) {
+        final exported = await _writeAndroidPezFiles(result.packages);
         if (!mounted) {
+          return;
+        }
+        if (exported == null) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('已取消导出。')));
           return;
         }
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              '已导出 ${result.exported} 个谱面，跳过 ${result.skipped} 个。',
+              '已导出 $exported 个谱面到所选目录，跳过 ${result.skipped} 个。',
             ),
           ),
         );
+        return;
       }
+
+      final outputPath = result.outputDirectory?.path ?? '';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '已导出 ${result.files.length} 个谱面到 $outputPath，跳过 ${result.skipped} 个。',
+          ),
+        ),
+      );
     } on Object catch (error) {
       ScaffoldMessenger.of(
         context,
@@ -358,12 +390,106 @@ class _LibraryHomeState extends State<LibraryHome> {
     }
   }
 
-  Rect? _shareOrigin(BuildContext context) {
-    final renderObject = context.findRenderObject();
-    if (renderObject is! RenderBox || !renderObject.hasSize) {
+  Future<Set<String>?> _selectExportLevels(Song song) async {
+    final selected = {
+      for (final level in song.levels)
+        if (level.chartPath != null) level.code,
+    };
+    return showModalBottomSheet<Set<String>>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '导出 Phira 谱面',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      Platform.isAndroid
+                          ? '选择要导出的难度，然后在系统文件管理器中选择或新建保存目录。'
+                          : '选择要导出的难度，文件会写入本地 phira 导出目录。',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                    const SizedBox(height: 12),
+                    for (final level in song.levels)
+                      CheckboxListTile(
+                        contentPadding: EdgeInsets.zero,
+                        value: selected.contains(level.code),
+                        onChanged: level.chartPath == null
+                            ? null
+                            : (checked) {
+                                setSheetState(() {
+                                  if (checked ?? false) {
+                                    selected.add(level.code);
+                                  } else {
+                                    selected.remove(level.code);
+                                  }
+                                });
+                              },
+                        title: Text(level.code),
+                        subtitle: Text(
+                          level.difficulty == null
+                              ? 'Lv.?'
+                              : 'Lv.${level.difficulty!.toStringAsFixed(1)}',
+                        ),
+                      ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        TextButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          child: const Text('取消'),
+                        ),
+                        const Spacer(),
+                        FilledButton.icon(
+                          onPressed: selected.isEmpty
+                              ? null
+                              : () => Navigator.of(context).pop({...selected}),
+                          icon: Icon(
+                            Platform.isAndroid
+                                ? Icons.create_new_folder
+                                : Icons.folder,
+                          ),
+                          label: Text(Platform.isAndroid ? '选择目录' : '导出'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<int?> _writeAndroidPezFiles(List<PhiraExportPackage> packages) async {
+    final result = await _phiraExportChannel.invokeMapMethod<String, Object?>(
+      'exportPezFiles',
+      {
+        'files': [
+          for (final package in packages)
+            {
+              'name': package.fileName,
+              'bytes': package.bytes,
+            },
+        ],
+      },
+    );
+    if (result?['cancelled'] == true) {
       return null;
     }
-    return renderObject.localToGlobal(Offset.zero) & renderObject.size;
+    return (result?['exported'] as num?)?.toInt() ?? 0;
   }
 
   Future<void> _showUpdateSheet(SongCatalog? catalog) async {
@@ -605,8 +731,8 @@ class SongDetailsPane extends StatelessWidget {
           children: [
             OutlinedButton.icon(
               onPressed: onExportPhira,
-              icon: const Icon(Icons.ios_share),
-              label: const Text('分享 Phira'),
+              icon: const Icon(Icons.drive_folder_upload),
+              label: const Text('导出 Phira'),
             ),
           ],
         ),
