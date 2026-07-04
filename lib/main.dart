@@ -398,72 +398,82 @@ class _LibraryHomeState extends State<LibraryHome> {
     return showModalBottomSheet<Set<String>>(
       context: context,
       showDragHandle: true,
+      isScrollControlled: true,
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setSheetState) {
-            return SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '导出 Phira 谱面',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      Platform.isAndroid
-                          ? '选择要导出的难度，然后在系统文件管理器中选择或新建保存目录。'
-                          : '选择要导出的难度，文件会写入本地 phira 导出目录。',
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
-                    const SizedBox(height: 12),
-                    for (final level in song.levels)
-                      CheckboxListTile(
-                        contentPadding: EdgeInsets.zero,
-                        value: selected.contains(level.code),
-                        onChanged: level.chartPath == null
-                            ? null
-                            : (checked) {
-                                setSheetState(() {
-                                  if (checked ?? false) {
-                                    selected.add(level.code);
-                                  } else {
-                                    selected.remove(level.code);
-                                  }
-                                });
-                              },
-                        title: Text(level.code),
-                        subtitle: Text(
-                          level.difficulty == null
-                              ? 'Lv.?'
-                              : 'Lv.${level.difficulty!.toStringAsFixed(1)}',
+            return FractionallySizedBox(
+              heightFactor: 0.82,
+              child: SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '导出 Phira 谱面',
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        Platform.isAndroid
+                            ? '选择要导出的难度，然后在系统文件管理器中选择或新建保存目录。'
+                            : '选择要导出的难度，文件会写入本地 phira 导出目录。',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                      const SizedBox(height: 12),
+                      Expanded(
+                        child: ListView(
+                          children: [
+                            for (final level in song.levels)
+                              CheckboxListTile(
+                                contentPadding: EdgeInsets.zero,
+                                value: selected.contains(level.code),
+                                onChanged: level.chartPath == null
+                                    ? null
+                                    : (checked) {
+                                        setSheetState(() {
+                                          if (checked ?? false) {
+                                            selected.add(level.code);
+                                          } else {
+                                            selected.remove(level.code);
+                                          }
+                                        });
+                                      },
+                                title: Text(level.code),
+                                subtitle: Text(
+                                  level.difficulty == null
+                                      ? 'Lv.?'
+                                      : 'Lv.${level.difficulty!.toStringAsFixed(1)}',
+                                ),
+                              ),
+                          ],
                         ),
                       ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        TextButton(
-                          onPressed: () => Navigator.of(context).pop(),
-                          child: const Text('取消'),
-                        ),
-                        const Spacer(),
-                        FilledButton.icon(
-                          onPressed: selected.isEmpty
-                              ? null
-                              : () => Navigator.of(context).pop({...selected}),
-                          icon: Icon(
-                            Platform.isAndroid
-                                ? Icons.create_new_folder
-                                : Icons.folder,
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          TextButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            child: const Text('取消'),
                           ),
-                          label: Text(Platform.isAndroid ? '选择目录' : '导出'),
-                        ),
-                      ],
-                    ),
-                  ],
+                          const Spacer(),
+                          FilledButton.icon(
+                            onPressed: selected.isEmpty
+                                ? null
+                                : () =>
+                                    Navigator.of(context).pop({...selected}),
+                            icon: Icon(
+                              Platform.isAndroid
+                                  ? Icons.create_new_folder
+                                  : Icons.folder,
+                            ),
+                            label: Text(Platform.isAndroid ? '选择目录' : '导出'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             );
