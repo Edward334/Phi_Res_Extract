@@ -11,11 +11,13 @@ class PhiraExportResult {
     required this.exported,
     required this.skipped,
     required this.outputDirectory,
+    required this.files,
   });
 
   final int exported;
   final int skipped;
   final Directory outputDirectory;
+  final List<File> files;
 }
 
 class PhiraExportService {
@@ -30,6 +32,7 @@ class PhiraExportService {
 
     var exported = 0;
     var skipped = 0;
+    final files = <File>[];
     final outputDirectory = Directory(p.join(repository.libraryRoot, 'phira'));
 
     for (final level in song.levels) {
@@ -87,9 +90,10 @@ class PhiraExportService {
         skipped += 1;
         continue;
       }
-      File(
+      final outputFile = File(
         p.join(levelDirectory.path, '${song.id}-${level.code}.pez'),
-      ).writeAsBytesSync(bytes);
+      )..writeAsBytesSync(bytes);
+      files.add(outputFile);
       exported += 1;
     }
 
@@ -97,6 +101,7 @@ class PhiraExportService {
       exported: exported,
       skipped: skipped,
       outputDirectory: outputDirectory,
+      files: files,
     );
   }
 }

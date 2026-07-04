@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
+import 'package:share_plus/share_plus.dart';
 
 import 'models/song.dart';
 import 'services/catalog_repository.dart';
@@ -45,16 +48,42 @@ class _LibraryHomeState extends State<LibraryHome> {
   Song? _selected;
   String _filter = '';
   PlayerState _playerState = PlayerState.stopped;
+  Duration _playerPosition = Duration.zero;
+  Duration _playerDuration = Duration.zero;
+  String? _playingSongId;
   bool _updating = false;
   ResourceUpdateEvent? _updateEvent;
+  StreamSubscription<PlayerState>? _playerStateSubscription;
+  StreamSubscription<Duration>? _playerPositionSubscription;
+  StreamSubscription<Duration>? _playerDurationSubscription;
+  StreamSubscription<void>? _playerCompleteSubscription;
 
   @override
   void initState() {
     super.initState();
     _initializeLibrary();
-    _player.onPlayerStateChanged.listen((state) {
+    _playerStateSubscription = _player.onPlayerStateChanged.listen((state) {
       if (mounted) {
         setState(() => _playerState = state);
+      }
+    });
+    _playerPositionSubscription = _player.onPositionChanged.listen((position) {
+      if (mounted) {
+        setState(() => _playerPosition = position);
+      }
+    });
+    _playerDurationSubscription = _player.onDurationChanged.listen((duration) {
+      if (mounted) {
+        setState(() => _playerDuration = duration);
+      }
+    });
+    _playerCompleteSubscription = _player.onPlayerComplete.listen((_) {
+      if (mounted) {
+        setState(() {
+          _playerState = PlayerState.completed;
+          _playerPosition = Duration.zero;
+          _playingSongId = null;
+        });
       }
     });
   }
@@ -76,6 +105,10 @@ class _LibraryHomeState extends State<LibraryHome> {
 
   @override
   void dispose() {
+    _playerStateSubscription?.cancel();
+    _playerPositionSubscription?.cancel();
+    _playerDurationSubscription?.cancel();
+    _playerCompleteSubscription?.cancel();
     _player.dispose();
     super.dispose();
   }
@@ -160,10 +193,18 @@ class _LibraryHomeState extends State<LibraryHome> {
                           key: ValueKey(selected?.id),
                           song: selected,
                           repository: repository,
-                          playerState: _playerState,
+                          playerState: _stateFor(selected),
+                          playerPosition: _positionFor(selected),
+                          playerDuration: _durationFor(selected),
                           onTogglePlay: selected == null
                               ? null
                               : () => _togglePlay(selected),
+                          onSeek: selected == null
+                              ? null
+                              : (position) => _seekTo(selected, position),
+                          onOpenFullscreen: selected == null
+                              ? null
+                              : () => _openSongFullscreen(selected, repository),
                           onExportPhira: selected == null
                               ? null
                               : () => _exportPhiraPackage(selected),
@@ -212,8 +253,13 @@ class _LibraryHomeState extends State<LibraryHome> {
   }
 
   Future<void> _togglePlay(Song song) async {
-    if (_playerState == PlayerState.playing) {
+    if (_playingSongId == song.id && _playerState == PlayerState.playing) {
       await _player.pause();
+      return;
+    }
+
+    if (_playingSongId == song.id && _playerState == PlayerState.paused) {
+      await _player.resume();
       return;
     }
 
@@ -227,13 +273,76 @@ class _LibraryHomeState extends State<LibraryHome> {
       return;
     }
 
+    setState(() {
+      _playingSongId = song.id;
+      _playerPosition = Duration.zero;
+      _playerDuration = Duration.zero;
+    });
     await _player.play(DeviceFileSource(music.path));
+  }
+
+  Future<void> _seekTo(Song song, Duration position) async {
+    if (_playingSongId != song.id) {
+      return;
+    }
+    await _player.seek(position);
+  }
+
+  Duration _positionFor(Song? song) {
+    return song?.id == _playingSongId ? _playerPosition : Duration.zero;
+  }
+
+  Duration _durationFor(Song? song) {
+    return song?.id == _playingSongId ? _playerDuration : Duration.zero;
+  }
+
+  PlayerState _stateFor(Song? song) {
+    return song?.id == _playingSongId ? _playerState : PlayerState.stopped;
+  }
+
+  Future<void> _openSongFullscreen(
+    Song song,
+    CatalogRepository repository,
+  ) async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (context) => _SongDetailsPage(
+          song: song,
+          repository: repository,
+          player: _player,
+          activePlayback: song.id == _playingSongId,
+          playerState: _stateFor(song),
+          playerPosition: _positionFor(song),
+          playerDuration: _durationFor(song),
+          onTogglePlay: () => _togglePlay(song),
+          onSeek: (position) => _seekTo(song, position),
+          onExportPhira: () => _exportPhiraPackage(song),
+        ),
+      ),
+    );
   }
 
   Future<void> _exportPhiraPackage(Song song) async {
     try {
       final result = _exporter!.exportSong(song);
       if (mounted) {
+        if (result.files.isNotEmpty) {
+          await SharePlus.instance.share(
+            ShareParams(
+              title: '分享 Phira 谱面',
+              subject: song.title,
+              text: 'Phigros 资源库导出的 Phira 谱面：${song.title}',
+              files: [
+                for (final file in result.files)
+                  XFile(file.path, mimeType: 'application/octet-stream'),
+              ],
+              sharePositionOrigin: _shareOrigin(context),
+            ),
+          );
+        }
+        if (!mounted) {
+          return;
+        }
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -247,6 +356,14 @@ class _LibraryHomeState extends State<LibraryHome> {
         context,
       ).showSnackBar(SnackBar(content: Text(error.toString())));
     }
+  }
+
+  Rect? _shareOrigin(BuildContext context) {
+    final renderObject = context.findRenderObject();
+    if (renderObject is! RenderBox || !renderObject.hasSize) {
+      return null;
+    }
+    return renderObject.localToGlobal(Offset.zero) & renderObject.size;
   }
 
   Future<void> _showUpdateSheet(SongCatalog? catalog) async {
@@ -408,7 +525,11 @@ class SongDetailsPane extends StatelessWidget {
     required this.song,
     required this.repository,
     required this.playerState,
+    required this.playerPosition,
+    required this.playerDuration,
     required this.onTogglePlay,
+    required this.onSeek,
+    required this.onOpenFullscreen,
     required this.onExportPhira,
     super.key,
   });
@@ -416,7 +537,11 @@ class SongDetailsPane extends StatelessWidget {
   final Song? song;
   final CatalogRepository repository;
   final PlayerState playerState;
+  final Duration playerPosition;
+  final Duration playerDuration;
   final VoidCallback? onTogglePlay;
+  final ValueChanged<Duration>? onSeek;
+  final VoidCallback? onOpenFullscreen;
   final VoidCallback? onExportPhira;
 
   @override
@@ -446,29 +571,42 @@ class SongDetailsPane extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 20),
-        Text(song!.title, style: Theme.of(context).textTheme.headlineMedium),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Text(
+                song!.title,
+                style: Theme.of(context).textTheme.headlineMedium,
+              ),
+            ),
+            if (onOpenFullscreen != null)
+              IconButton(
+                tooltip: '全屏',
+                onPressed: onOpenFullscreen,
+                icon: const Icon(Icons.fullscreen),
+              ),
+          ],
+        ),
         const SizedBox(height: 6),
         Text(song!.id, style: Theme.of(context).textTheme.labelLarge),
         const SizedBox(height: 20),
+        _PlaybackControls(
+          playerState: playerState,
+          position: playerPosition,
+          duration: playerDuration,
+          onTogglePlay: onTogglePlay,
+          onSeek: onSeek,
+        ),
+        const SizedBox(height: 12),
         Wrap(
           spacing: 10,
           runSpacing: 10,
           children: [
-            FilledButton.icon(
-              onPressed: onTogglePlay,
-              icon: Icon(
-                playerState == PlayerState.playing
-                    ? Icons.pause
-                    : Icons.play_arrow,
-              ),
-              label: Text(
-                playerState == PlayerState.playing ? '暂停' : '播放',
-              ),
-            ),
             OutlinedButton.icon(
               onPressed: onExportPhira,
-              icon: const Icon(Icons.archive),
-              label: const Text('导出 Phira'),
+              icon: const Icon(Icons.ios_share),
+              label: const Text('分享 Phira'),
             ),
           ],
         ),
@@ -480,6 +618,181 @@ class SongDetailsPane extends StatelessWidget {
         for (final level in song!.levels) _LevelTile(level: level),
       ],
     );
+  }
+}
+
+class _SongDetailsPage extends StatefulWidget {
+  const _SongDetailsPage({
+    required this.song,
+    required this.repository,
+    required this.player,
+    required this.activePlayback,
+    required this.playerState,
+    required this.playerPosition,
+    required this.playerDuration,
+    required this.onTogglePlay,
+    required this.onSeek,
+    required this.onExportPhira,
+  });
+
+  final Song song;
+  final CatalogRepository repository;
+  final AudioPlayer player;
+  final bool activePlayback;
+  final PlayerState playerState;
+  final Duration playerPosition;
+  final Duration playerDuration;
+  final VoidCallback onTogglePlay;
+  final ValueChanged<Duration> onSeek;
+  final VoidCallback onExportPhira;
+
+  @override
+  State<_SongDetailsPage> createState() => _SongDetailsPageState();
+}
+
+class _SongDetailsPageState extends State<_SongDetailsPage> {
+  late PlayerState _playerState;
+  late Duration _position;
+  late Duration _duration;
+  late bool _activePlayback;
+  StreamSubscription<PlayerState>? _stateSubscription;
+  StreamSubscription<Duration>? _positionSubscription;
+  StreamSubscription<Duration>? _durationSubscription;
+  StreamSubscription<void>? _completeSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _playerState = widget.playerState;
+    _position = widget.playerPosition;
+    _duration = widget.playerDuration;
+    _activePlayback = widget.activePlayback;
+    _stateSubscription = widget.player.onPlayerStateChanged.listen((state) {
+      if (mounted && _activePlayback) {
+        setState(() => _playerState = state);
+      }
+    });
+    _positionSubscription = widget.player.onPositionChanged.listen((position) {
+      if (mounted && _activePlayback) {
+        setState(() => _position = position);
+      }
+    });
+    _durationSubscription = widget.player.onDurationChanged.listen((duration) {
+      if (mounted && _activePlayback) {
+        setState(() => _duration = duration);
+      }
+    });
+    _completeSubscription = widget.player.onPlayerComplete.listen((_) {
+      if (mounted && _activePlayback) {
+        setState(() {
+          _position = Duration.zero;
+          _playerState = PlayerState.completed;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _stateSubscription?.cancel();
+    _positionSubscription?.cancel();
+    _durationSubscription?.cancel();
+    _completeSubscription?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('曲目详情')),
+      body: SafeArea(
+        child: SongDetailsPane(
+          song: widget.song,
+          repository: widget.repository,
+          playerState: _playerState,
+          playerPosition: _position,
+          playerDuration: _duration,
+          onTogglePlay: () {
+            if (!_activePlayback) {
+              setState(() {
+                _activePlayback = true;
+                _position = Duration.zero;
+                _duration = Duration.zero;
+                _playerState = PlayerState.stopped;
+              });
+            }
+            widget.onTogglePlay();
+          },
+          onSeek: widget.onSeek,
+          onOpenFullscreen: null,
+          onExportPhira: widget.onExportPhira,
+        ),
+      ),
+    );
+  }
+}
+
+class _PlaybackControls extends StatelessWidget {
+  const _PlaybackControls({
+    required this.playerState,
+    required this.position,
+    required this.duration,
+    required this.onTogglePlay,
+    required this.onSeek,
+  });
+
+  final PlayerState playerState;
+  final Duration position;
+  final Duration duration;
+  final VoidCallback? onTogglePlay;
+  final ValueChanged<Duration>? onSeek;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasDuration = duration > Duration.zero;
+    final max = hasDuration ? duration.inMilliseconds.toDouble() : 1.0;
+    final value = position.inMilliseconds.clamp(0, max.toInt()).toDouble();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            FilledButton.icon(
+              onPressed: onTogglePlay,
+              icon: Icon(
+                playerState == PlayerState.playing
+                    ? Icons.pause
+                    : Icons.play_arrow,
+              ),
+              label: Text(playerState == PlayerState.playing ? '暂停' : '播放'),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              '${_formatDuration(position)} / ${_formatDuration(duration)}',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+          ],
+        ),
+        Slider(
+          value: value,
+          max: max,
+          onChanged: hasDuration && onSeek != null
+              ? (next) => onSeek!(Duration(milliseconds: next.round()))
+              : null,
+        ),
+      ],
+    );
+  }
+
+  static String _formatDuration(Duration duration) {
+    final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+    final hours = duration.inHours;
+    if (hours > 0) {
+      return '$hours:$minutes:$seconds';
+    }
+    return '$minutes:$seconds';
   }
 }
 
