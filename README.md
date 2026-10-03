@@ -99,6 +99,8 @@ resources from the app.
    python tools/phigros_updater.py resolve-apk --out /tmp/phigros_latest.json
    python tools/phigros_updater.py update --apk /path/to/phigros.apk --metadata /tmp/phigros_latest.json --out .phigros_library
    python tools/phigros_updater.py update --apk /path/to/phigros.apk --typetree /path/to/typetree.json --out .phigros_library
+   # Phigros 4.0.1 APKs are supported, including the bundled Unity data layout.
+   python tools/phigros_updater.py update --apk /path/to/phigros_4.0.1_157.apk --out .phigros_library
    python tools/phigros_updater.py update --apk /path/to/phigros.apk --song '70MinutesFighters.かたぎり' --out .phigros_library
    python tools/phigros_updater.py update --out .phigros_library --catalog-only
    python tools/phigros_updater.py update --out .phigros_library --no-clean
@@ -139,4 +141,4 @@ resources from the app.
    missing. Use `--allow-incomplete` only when you explicitly want diagnostic
    packages.
 
-The updater is data-driven: it reads `GameInformation` and Addressables from the APK so new songs and level counts are picked up without editing app code.
+The updater is data-driven: it reads `GameInformation` and Addressables from the APK so new songs and level counts are picked up without editing app code. It supports both the legacy Unity data layout and Phigros 4.0.1's `data.unity3d` layout. Addressables bundle names are resolved from the APK catalog, and hidden/unlisted chart entries are included during a full update. Song-level and chapter-level unlock metadata is preserved in the generated catalog under `unlockInfo`, `chapterCode`, `chapterUnlockInfo`, and `chapterSongUnlockInfo`; `.pez` `info.txt` files also include `Chapter` and `Unlock` when present.

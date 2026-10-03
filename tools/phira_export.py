@@ -35,14 +35,17 @@ def export_song(
     exported: list[Path] = []
     skipped: list[str] = []
     song_id = song["id"]
-    for index, difficulty in enumerate(song.get("difficulties", [])):
-        if index >= len(LEVELS):
+    chart_paths = song.get("chartPaths", {})
+    difficulties = song.get("difficulties", [])
+    charters = song.get("charters", [])
+    for level, chart_rel in chart_paths.items():
+        if level not in LEVELS:
             continue
-        level = LEVELS[index]
+        level_index = LEVELS.index(level)
+        difficulty = difficulties[level_index] if level_index < len(difficulties) else 0
         level_dir = out_dir / level
         level_dir.mkdir(parents=True, exist_ok=True)
         target = level_dir / f"{song_id}-{level}.pez"
-        chart_rel = song.get("chartPaths", {}).get(level)
         music_rel = song.get("musicPath")
         image_rel = song.get("illustrationPath")
         music_name = f"{song_id}{Path(music_rel).suffix if music_rel else '.ogg'}"
@@ -56,7 +59,9 @@ def export_song(
             skipped.append(f"{song_id}-{level}: missing {', '.join(missing)}")
             continue
 
-        charter = song.get("charters", [""] * len(LEVELS))
+        charter = charters[level_index] if level_index < len(charters) else ""
+        unlock_info = song.get("chapterSongUnlockInfo") or song.get("unlockInfo") or []
+        chapter_code = song.get("chapterCode") or ""
         info_txt = "\n".join(
             [
                 "#",
@@ -67,7 +72,9 @@ def export_song(
                 f"Level: {level} Lv.{difficulty}",
                 f"Composer: {song.get('composer', '')}",
                 f"Illustrator: {song.get('illustrator', '')}",
-                f"Charter: {charter[index] if index < len(charter) else ''}",
+                f"Charter: {charter}",
+                f"Chapter: {chapter_code}" if chapter_code else "",
+                f"Unlock: {json.dumps(unlock_info, ensure_ascii=False)}" if unlock_info else "",
             ]
         )
 

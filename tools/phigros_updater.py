@@ -15,6 +15,7 @@ import json
 import random
 import shutil
 import string
+import struct
 import sys
 import time
 import urllib.parse
@@ -43,6 +44,10 @@ class SongInfo:
     illustrator: str
     charters: list[str] = field(default_factory=list)
     difficulties: list[float] = field(default_factory=list)
+    unlock_info: list[dict[str, Any]] = field(default_factory=list)
+    chapter_code: str | None = None
+    chapter_unlock_info: dict[str, Any] = field(default_factory=dict)
+    chapter_song_unlock_info: dict[str, Any] = field(default_factory=dict)
 
 
 class ByteReader:
@@ -342,10 +347,25 @@ def verify_apk(
     return True
 
 
+def resolve_addressable_bundle(bundle: str, apk_names: set[str]) -> str:
+    direct = f"assets/aa/Android/{bundle}"
+    if direct in apk_names:
+        return bundle
+
+    # Newer Addressables catalogs store a logical hash followed by the actual
+    # APK filename: <logical>_<internal-id>.bundle.
+    actual = bundle.rsplit("_", 1)[-1]
+    candidate = f"assets/aa/Android/{actual}"
+    if candidate in apk_names:
+        return actual
+    raise KeyError(f"Addressables bundle not found in APK: {bundle}")
+
+
 def read_addressables_table(apk_path: Path) -> list[tuple[str, str]]:
     with ZipFile(apk_path) as apk:
         with apk.open("assets/aa/catalog.json") as file:
             data = json.load(file)
+        apk_names = set(apk.namelist())
 
     key_data = base64.b64decode(data["m_KeyDataString"])
     bucket_data = base64.b64decode(data["m_BucketDataString"])
@@ -388,10 +408,98 @@ def read_addressables_table(apk_path: Path) -> list[tuple[str, str]]:
         if key.startswith("Assets/Tracks/#"):
             continue
         if key.startswith("Assets/Tracks/"):
-            result.append((key.removeprefix("Assets/Tracks/"), bundle))
-        elif key.startswith("avatar."):
-            result.append((key, bundle))
+            key = key.removeprefix("Assets/Tracks/")
+        elif not key.startswith("avatar."):
+            continue
+        result.append((key, resolve_addressable_bundle(bundle, apk_names)))
     return result
+
+
+def track_id_from_asset_key(key: str) -> str:
+    return key.split("/", 1)[0]
+
+
+def song_id_from_track_id(track_id: str) -> str:
+    return track_id.removesuffix(".0")
+
+
+DATA_FILES = (
+    "assets/bin/Data/level0",
+    "assets/bin/Data/level1",
+    "assets/bin/Data/globalgamemanagers.assets",
+)
+BUNDLED_DATA_FILE = "assets/bin/Data/data.unity3d"
+FIRST_CHAPTER_CODE = "Single"
+
+
+def load_game_information_environment(apk_path: Path) -> Any:
+    from UnityPy import Environment
+
+    env = Environment()
+    with ZipFile(apk_path) as apk:
+        names = set(apk.namelist())
+        candidates = []
+        if BUNDLED_DATA_FILE in names:
+            candidates.append(BUNDLED_DATA_FILE)
+        candidates.extend(name for name in DATA_FILES if name in names)
+        if not candidates:
+            raise RuntimeError(
+                f"no Unity data files found in {apk_path}; looked for "
+                f"{BUNDLED_DATA_FILE} and {', '.join(DATA_FILES)}"
+            )
+        for name in candidates:
+            env.load_file(BytesIO(apk.read(name)), name=name)
+    return env
+
+
+def find_typetree_node(node: Any, *, name: str | None = None, type_name: str | None = None) -> Any | None:
+    if (name is None or node.m_Name == name) and (type_name is None or node.m_Type == type_name):
+        return node
+    for child in node.m_Children:
+        found = find_typetree_node(child, name=name, type_name=type_name)
+        if found is not None:
+            return found
+    return None
+
+
+def locate_chapter_array(raw: bytes) -> int:
+    needle = struct.pack("<i", len(FIRST_CHAPTER_CODE)) + FIRST_CHAPTER_CODE.encode()
+    position = raw.find(needle)
+    if position < 4:
+        raise RuntimeError("could not locate the GameInformation chapter array")
+    return position - 4
+
+
+def read_new_game_information(obj: Any, typetree: dict[str, Any]) -> dict[str, Any]:
+    from UnityPy.helpers import TypeTreeHelper as type_tree_helper
+    from UnityPy.helpers.TypeTreeHelper import TypeTreeNode
+    from UnityPy.streams import EndianBinaryReader
+
+    root = TypeTreeNode.from_list(typetree["GameInformation"])
+    chapter_node = find_typetree_node(root, type_name="Chapter")
+    song_node = find_typetree_node(root, name="song")
+    key_store_node = find_typetree_node(root, name="keyStore")
+    combos_node = find_typetree_node(root, name="songAllCombos")
+    if not all((chapter_node, song_node, key_store_node, combos_node)):
+        raise RuntimeError("GameInformation typetree is missing a required 4.0.1 node")
+
+    raw = obj.get_raw_data()
+    reader = EndianBinaryReader(raw, endian="<")
+    reader.Position = locate_chapter_array(raw)
+    config = type_tree_helper.TypeTreeConfig(True, obj.assets_file, False)
+    count = reader.read_int()
+    if not 1 <= count <= 200:
+        raise RuntimeError(f"implausible GameInformation chapter count: {count}")
+    chapters = [type_tree_helper.read_value(chapter_node, reader, config) for _ in range(count)]
+    song = type_tree_helper.read_value(song_node, reader, config)
+    key_store = type_tree_helper.read_value(key_store_node, reader, config)
+    combos = type_tree_helper.read_value(combos_node, reader, config)
+    return {
+        "chapters": chapters,
+        "song": song,
+        "keyStore": key_store,
+        "songAllCombos": combos,
+    }
 
 
 def extract_game_information(
@@ -400,52 +508,77 @@ def extract_game_information(
     typetree_path: Path | None = None,
 ) -> dict[str, SongInfo]:
     try:
-        from UnityPy import Environment
+        import UnityPy  # noqa: F401
     except ImportError as exc:
         raise RuntimeError("UnityPy is required: python -m pip install UnityPy") from exc
 
-    env = Environment()
-    with ZipFile(apk_path) as apk:
-        for name in ("assets/bin/Data/globalgamemanagers.assets", "assets/bin/Data/level0"):
-            with apk.open(name) as file:
-                env.load_file(BytesIO(file.read()), name=name)
-
+    env = load_game_information_environment(apk_path)
     game_information: dict[str, Any] | None = None
     for obj in env.objects:
         if obj.type.name != "MonoBehaviour":
             continue
-        if read_script_name(obj) != "GameInformation":
+        try:
+            if read_script_name(obj) != "GameInformation":
+                continue
+        except Exception:
             continue
         try:
             game_information = obj.read_typetree()
-        except (TypeError, ValueError):
+        except Exception:
             trees = load_typetree(out_dir, typetree_path)
-            game_information = obj.read_typetree(trees["GameInformation"], check_read=False)
+            try:
+                game_information = obj.read_typetree(trees["GameInformation"], check_read=False)
+            except Exception:
+                game_information = read_new_game_information(obj, trees)
         break
 
     if not game_information:
         raise RuntimeError("GameInformation was not found in the APK.")
 
     songs: dict[str, SongInfo] = {}
-    for group_name, group_songs in game_information["song"].items():
-        if group_name == "otherSongs":
-            continue
+    for group_songs in game_information["song"].values():
         for song in group_songs:
             song_id = str(song["songsId"]).removesuffix(".0")
-            difficulties = [round(float(item), 1) for item in song["difficulty"] if float(item) > 0]
-            charters = [str(item) for item in song["charter"][: len(difficulties)]]
+            raw_difficulties = [float(item) for item in song.get("difficulty", [])[: len(LEVELS)]]
+            difficulties = [round(item, 1) if item > 0 else 0.0 for item in raw_difficulties]
+            charters = [str(item) for item in song.get("charter", [])[: len(LEVELS)]]
             songs[song_id] = SongInfo(
                 id=song_id,
-                title=str(song["songsName"]),
-                composer=str(song["composer"]),
-                illustrator=str(song["illustrator"]),
+                title=str(song.get("songsName", song_id)),
+                composer=str(song.get("composer", "")),
+                illustrator=str(song.get("illustrator", "")),
                 charters=charters,
-                difficulties=difficulties[: len(LEVELS)],
+                difficulties=difficulties,
+                unlock_info=[dict(item) for item in song.get("unlockInfo", [])[: len(LEVELS)]],
             )
+
+    for chapter in game_information.get("chapters", []):
+        chapter_code = str(chapter.get("chapterCode", ""))
+        chapter_unlock = chapter.get("unlockInfo", {}) or {}
+        for chapter_song in chapter.get("songInfo", {}).get("songs", []):
+            song_id = str(chapter_song["songsId"]).removesuffix(".0")
+            if song_id in songs and songs[song_id].chapter_code is None:
+                songs[song_id].chapter_code = chapter_code
+                songs[song_id].chapter_unlock_info = dict(chapter_unlock)
+                songs[song_id].chapter_song_unlock_info = {
+                    key: value
+                    for key, value in {
+                        "unlockType": chapter_song.get("unlockType"),
+                        "unlockInfo": chapter_song.get("unlockInfo", []),
+                        "secretType": chapter_song.get("secretType"),
+                        "secretInfo": chapter_song.get("secretInfo", []),
+                    }.items()
+                    if value not in (None, [], "")
+                }
     return songs
 
 
-def extract_track_assets(apk_path: Path, out_dir: Path, song_ids: set[str]) -> None:
+def extract_track_assets(
+    apk_path: Path,
+    out_dir: Path,
+    song_ids: set[str],
+    include_unlisted: bool = False,
+) -> None:
     try:
         from UnityPy import Environment
         from UnityPy.enums import ClassIDType
@@ -463,7 +596,7 @@ def extract_track_assets(apk_path: Path, out_dir: Path, song_ids: set[str]) -> N
     table = [
         (key, bundle)
         for key, bundle in read_addressables_table(apk_path)
-        if should_extract_asset(key, song_ids)
+        if should_extract_asset(key, song_ids, include_unlisted)
     ]
     total = len(table)
     with ZipFile(apk_path) as apk:
@@ -482,33 +615,44 @@ def extract_track_assets(apk_path: Path, out_dir: Path, song_ids: set[str]) -> N
                 print(f"assets extracted {index}/{total} ({percent:.1f}%)", flush=True)
 
 
-def should_extract_asset(key: str, song_ids: set[str]) -> bool:
-    song_id = key.split(".0/", 1)[0]
-    if song_id not in song_ids:
+def should_extract_asset(
+    key: str,
+    song_ids: set[str],
+    include_unlisted: bool = False,
+) -> bool:
+    track_id = track_id_from_asset_key(key)
+    song_id = song_id_from_track_id(track_id)
+    if not include_unlisted and song_id not in song_ids:
         return False
-    return key.endswith(".json") or key.endswith(".0/music.wav") or ".0/Illustration" in key
+    return (
+        "/Chart_" in key and key.endswith(".json")
+        or key.endswith("/music.wav")
+        or "/Illustration" in key
+    )
 
 
 def save_resource(key: str, obj: Any, out_dir: Path) -> None:
+    track_id = track_id_from_asset_key(key)
     if key.endswith(".json") and "/Chart_" in key:
-        track_id = key.split("/Chart_", 1)[0]
         level = key.rsplit("Chart_", 1)[1].split(".", 1)[0]
+        if level not in LEVELS:
+            return
         target = out_dir / "chart" / track_id / f"{level}.json"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(text_asset_bytes(obj))
         return
 
-    if ".0/IllustrationLowRes." in key or ".0/Illustration." in key:
-        song_id = key.split(".0/", 1)[0]
-        target = out_dir / "illustration" / f"{song_id}.png"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        obj.image.save(target)
+    if "/Illustration" in key:
+        image = getattr(obj, "image", None)
+        target = out_dir / "illustration" / f"{track_id}.png"
+        if image is not None and (key.endswith("/Illustration.jpg") or not target.exists()):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            image.save(target)
         return
 
-    if key.endswith(".0/music.wav"):
-        song_id = key.removesuffix(".0/music.wav")
+    if key.endswith("/music.wav"):
         data, extension = audio_clip_data(obj)
-        target = out_dir / "music" / f"{song_id}{extension}"
+        target = out_dir / "music" / f"{track_id}{extension}"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
 
@@ -539,24 +683,58 @@ def write_catalog(
         "apkVersionCode": version_code,
         "songs": [],
     }
-    for song in songs.values():
-        chart_paths = {}
-        for index, level in enumerate(LEVELS[: len(song.difficulties)]):
-            path = Path("chart") / f"{song.id}.0" / f"{level}.json"
-            if (out_dir / path).exists():
-                chart_paths[level] = path.as_posix()
-        illustration = Path("illustration") / f"{song.id}.png"
-        music_matches = sorted((out_dir / "music").glob(f"{song.id}.*")) if (out_dir / "music").exists() else []
+    chart_root = out_dir / "chart"
+    extracted_track_ids = (
+        {path.name for path in chart_root.iterdir() if path.is_dir()}
+        if chart_root.exists()
+        else set()
+    )
+    indexed_song_ids = {song_id_from_track_id(track_id) for track_id in extracted_track_ids}
+    metadata_track_ids = {f"{song_id}.0" for song_id in songs if song_id not in indexed_song_ids}
+    track_ids = sorted(extracted_track_ids | metadata_track_ids)
+    for track_id in track_ids:
+        song_id = song_id_from_track_id(track_id)
+        song = songs.get(song_id)
+        if song is None and track_id.startswith("Random.SobremSilentroom."):
+            song = songs.get("Random.SobremSilentroom")
+        if song is None:
+            song = SongInfo(song_id, song_id, "", "")
+        chart_paths = {
+            level: (Path("chart") / track_id / f"{level}.json").as_posix()
+            for level in LEVELS
+            if (chart_root / track_id / f"{level}.json").exists()
+        }
+        illustration = Path("illustration") / f"{track_id}.png"
+        legacy_illustration = Path("illustration") / f"{song_id}.png"
+        if not (out_dir / illustration).exists() and (out_dir / legacy_illustration).exists():
+            illustration = legacy_illustration
+        if not (out_dir / illustration).exists() and track_id.startswith("Random.SobremSilentroom."):
+            shared = Path("illustration") / "Random.SobremSilentroom.0.png"
+            if (out_dir / shared).exists():
+                illustration = shared
+        music_root = out_dir / "music"
+        music_matches = [
+            music_root / f"{stem}{extension}"
+            for stem in dict.fromkeys((track_id, song_id))
+            for extension in (".ogg", ".wav", ".m4a", ".bytes")
+            if (music_root / f"{stem}{extension}").is_file()
+        ]
         music_matches.sort(key=lambda path: {".ogg": 0, ".wav": 1, ".m4a": 2}.get(path.suffix, 99))
         music = music_matches[0].relative_to(out_dir) if music_matches else None
+        difficulties = list(song.difficulties[: len(LEVELS)])
+        difficulties.extend([0.0] * (len(LEVELS) - len(difficulties)))
         payload["songs"].append(
             {
-                "id": song.id,
+                "id": song_id,
                 "title": song.title,
                 "composer": song.composer,
                 "illustrator": song.illustrator,
                 "charters": song.charters,
-                "difficulties": song.difficulties,
+                "difficulties": difficulties,
+                "unlockInfo": song.unlock_info,
+                "chapterCode": song.chapter_code,
+                "chapterUnlockInfo": song.chapter_unlock_info,
+                "chapterSongUnlockInfo": song.chapter_song_unlock_info,
                 "illustrationPath": illustration.as_posix() if (out_dir / illustration).exists() else None,
                 "musicPath": music.as_posix() if music else None,
                 "chartPaths": chart_paths,
@@ -701,7 +879,12 @@ def run_update(args: argparse.Namespace) -> None:
         unknown = selected_songs.difference(songs)
         if unknown:
             raise RuntimeError(f"Unknown song id(s): {', '.join(sorted(unknown))}")
-        extract_track_assets(apk_path, out_dir, selected_songs)
+        extract_track_assets(
+            apk_path,
+            out_dir,
+            selected_songs,
+            include_unlisted=not bool(args.song),
+        )
 
     catalog = write_catalog(out_dir, songs, source, metadata)
     removed = [] if args.no_clean else cleanup_stale_resources(out_dir, catalog)
